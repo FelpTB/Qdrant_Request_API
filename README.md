@@ -17,6 +17,10 @@ Copie `.env` e preencha:
 
 Opcionais: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST` (local use `127.0.0.1` se quiser).
 
+**Se aparecer erro "Not existing vector name error: v_segmento"** — sua coleção pode usar **v_capacidades** em vez de v_segmento (ex.: `v_clientes`, `v_produtos`, `v_capacidades`). Defina no Railway (Variables):  
+`QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes`  
+(ordem: 1º = nome do vetor usado para "segmento" na API, 2º = produtos, 3º = clientes)
+
 ---
 
 ## Deploy no Railway

@@ -1,11 +1,23 @@
 import qdrantClient from "./qdrantClient.js";
 
+/** Chaves da API (sempre segmento, produtos, clientes). */
+const DIMENSION_KEYS = ["segmento", "produtos", "clientes"];
+
 /**
- * Nomes dos vetores na coleção Qdrant (named vectors).
- * Request usa: segmento, produtos, clientes → mapeados para v_segmento, v_produtos, v_clientes.
+ * Nomes reais dos vetores na coleção Qdrant (named vectors).
+ * Por padrão: v_segmento, v_produtos, v_clientes.
+ * Se a coleção usar outros nomes, defina QDRANT_VECTOR_NAMES no .env, ex.: segmento,produtos,clientes (sem prefixo v_).
  */
-const VECTOR_NAMES = ["segmento", "produtos", "clientes"];
-const QDRANT_VECTOR_PREFIX = "v_";
+function getQdrantVectorNames() {
+  const env = process.env.QDRANT_VECTOR_NAMES;
+  if (env && typeof env === "string") {
+    const names = env.split(",").map((s) => s.trim()).filter(Boolean);
+    if (names.length === 3) return names;
+  }
+  return ["v_segmento", "v_produtos", "v_clientes"];
+}
+
+const QDRANT_VECTOR_NAMES = getQdrantVectorNames();
 
 /**
  * Executa buscas independentes por cada vetor nomeado e combina os scores com pesos.
@@ -30,9 +42,9 @@ export async function multiVectorSearch({
   /** @type {Record<string|number, { id: number|string, payload: object, scores: Record<string, number> }>} */
   const byId = {};
 
-  const searchPromises = VECTOR_NAMES.map(async (dim) => {
+  const searchPromises = DIMENSION_KEYS.map(async (dim, index) => {
     const queryVector = vectors[dim];
-    const vectorName = QDRANT_VECTOR_PREFIX + dim;
+    const vectorName = QDRANT_VECTOR_NAMES[index];
     const points = await qdrantClient.search(collection, {
       vector: { name: vectorName, vector: queryVector },
       limit: limitPerVector,

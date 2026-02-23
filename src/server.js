@@ -96,9 +96,12 @@ app.post("/search", async (req, res) => {
     return res.json({ results });
   } catch (err) {
     console.error("Erro na busca vetorial:", err);
-    return res.status(500).json({
-      error: "Erro no banco vetorial",
-    });
+    const status = err.status ?? err.statusCode ?? 500;
+    const message =
+      status === 400 && err.data?.status?.error
+        ? err.data.status.error
+        : "Erro no banco vetorial";
+    return res.status(status).json({ error: message });
   }
 });
 
