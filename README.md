@@ -23,10 +23,10 @@ Opcionais: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST` (local use `127.0.0.1` se qu
 
 1. Crie um projeto no [Railway](https://railway.app) e conecte este repositório (ou faça deploy via CLI).
 2. O Railway detecta Node.js e usa `npm start` automaticamente. Não é necessário `Procfile`.
-3. **Variáveis de ambiente** — em **Variables** do serviço, configure:
-   - `QDRANT_KEY`
-   - `CLUSTER_ENDPOINT`
-   - `COLLECTION_NAME`
+3. **Variáveis de ambiente (obrigatório)** — o container **só inicia** se estiverem definidas. No Railway: projeto → seu serviço → **Variables** → **Add Variable** (ou **Raw Editor** para colar várias):
+   - `QDRANT_KEY` — API key do Qdrant Cloud
+   - `CLUSTER_ENDPOINT` — URL do cluster (ex.: `https://xxx.sa-east-1-0.aws.cloud.qdrant.io`)
+   - `COLLECTION_NAME` — nome da coleção
    - (Opcional) `SEARCH_TIMEOUT_SECONDS`
    - O Railway define `PORT` automaticamente; não é preciso configurá-lo.
 4. Após o deploy, a URL pública será algo como `https://qdrant-busca-api-production-xxxx.up.railway.app`. Use-a no n8n.
