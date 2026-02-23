@@ -1,0 +1,19 @@
+{
+  "name": "qdrant-busca-api",
+  "version": "1.0.0",
+  "description": "MVP API de busca vetorial multidimensional B2B com Qdrant",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@qdrant/js-client-rest": "^1.17.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0"
+  }
+}

@@ -1,0 +1,22 @@
+# Dependências
+node_modules/
+
+# Variáveis de ambiente (chaves e segredos)
+.env
+.env.local
+.env.*.local
+
+# Logs e cache
+npm-debug.log*
+.npm
+.cache
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
