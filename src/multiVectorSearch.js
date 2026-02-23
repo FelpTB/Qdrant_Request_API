@@ -27,20 +27,24 @@ export async function multiVectorSearch({
 }) {
   const collection = collectionName;
 
-  /** @type {Record<number, { id: number, payload: object, scores: Record<string, number> }>} */
+  /** @type {Record<string|number, { id: number|string, payload: object, scores: Record<string, number> }>} */
   const byId = {};
 
-  for (const dim of VECTOR_NAMES) {
+  const searchPromises = VECTOR_NAMES.map(async (dim) => {
     const queryVector = vectors[dim];
     const vectorName = QDRANT_VECTOR_PREFIX + dim;
-
     const points = await qdrantClient.search(collection, {
       vector: { name: vectorName, vector: queryVector },
       limit: limitPerVector,
       with_payload: true,
       with_vector: false,
     });
+    return { dim, points };
+  });
 
+  const results = await Promise.all(searchPromises);
+
+  for (const { dim, points } of results) {
     for (const point of points) {
       let id = point.id;
       if (typeof id === "object") {

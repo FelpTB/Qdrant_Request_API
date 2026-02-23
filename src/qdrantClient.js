@@ -18,7 +18,7 @@ if (!url || !apiKey) {
 const client = new QdrantClient({
   url,
   apiKey,
-  timeout: Number(process.env.SEARCH_TIMEOUT_SECONDS) || 60,
+  timeout: (Number(process.env.SEARCH_TIMEOUT_SECONDS) || 120) * 1000,
   checkCompatibility: false,
 });
 
