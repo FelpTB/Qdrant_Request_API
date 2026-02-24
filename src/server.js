@@ -8,6 +8,13 @@ app.use(express.json({ limit: "2mb" }));
 const COLLECTION_NAME = process.env.COLLECTION_NAME;
 const REQUIRED_DIMENSIONS = ["segmento", "produtos", "clientes"];
 
+/** Lista de chaves de payload permitidas para filtro (env QDRANT_PAYLOAD_KEYS, ex.: nome_empresa,industria,modelo_negocio). */
+function getAllowedPayloadKeys() {
+  const env = process.env.QDRANT_PAYLOAD_KEYS;
+  if (!env || typeof env !== "string") return [];
+  return env.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 function normalizeWeights(weights) {
   if (!weights || typeof weights !== "object") return null;
   const w = {
@@ -28,12 +35,38 @@ function isValidVector(arr) {
   return Array.isArray(arr) && arr.length > 0 && arr.every((x) => typeof x === "number" && !Number.isNaN(x));
 }
 
+/**
+ * Converte filtro simples { chave: valor } em formato Qdrant (must + match).
+ * Apenas chaves presentes em allowedKeys são aceitas.
+ */
+function buildQdrantFilter(payloadFilter, allowedKeys) {
+  if (!payloadFilter || typeof payloadFilter !== "object" || allowedKeys.length === 0)
+    return null;
+  const must = [];
+  for (const [key, value] of Object.entries(payloadFilter)) {
+    if (!allowedKeys.includes(key)) continue;
+    if (value === undefined || value === null) continue;
+    must.push({ key, match: { value } });
+  }
+  return must.length > 0 ? { must } : null;
+}
+
 /** Valida request e retorna erro { status, message } ou null. */
 function validateSearchBody(body) {
   if (!body || typeof body !== "object")
     return { status: 400, message: "Request body inválido" };
 
-  const { vectors, weights, limit_per_vector, final_limit } = body;
+  const { vectors, weights, limit_per_vector, final_limit, filter } = body;
+  const allowedPayloadKeys = getAllowedPayloadKeys();
+  if (filter != null && filter !== undefined) {
+    if (typeof filter !== "object" || Array.isArray(filter))
+      return { status: 400, message: "Campo 'filter' deve ser um objeto" };
+    if (allowedPayloadKeys.length === 0)
+      return { status: 400, message: "Configure QDRANT_PAYLOAD_KEYS no ambiente para usar filtros de payload" };
+    const invalidKeys = Object.keys(filter).filter((k) => !allowedPayloadKeys.includes(k));
+    if (invalidKeys.length > 0)
+      return { status: 400, message: `Chaves de filtro não permitidas: ${invalidKeys.join(", ")}. Permitidas: ${allowedPayloadKeys.join(", ")}` };
+  }
 
   if (!vectors || typeof vectors !== "object")
     return { status: 400, message: "Campo 'vectors' é obrigatório" };
@@ -76,8 +109,10 @@ app.post("/search", async (req, res) => {
     return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
   }
 
-  const { vectors, weights, limit_per_vector, final_limit } = req.body;
+  const { vectors, weights, limit_per_vector, final_limit, filter } = req.body;
   const w = normalizeWeights(weights);
+  const allowedPayloadKeys = getAllowedPayloadKeys();
+  const qdrantFilter = buildQdrantFilter(filter, allowedPayloadKeys);
 
   try {
     const results = await multiVectorSearch({
@@ -90,6 +125,7 @@ app.post("/search", async (req, res) => {
       limitPerVector: limit_per_vector,
       finalLimit: final_limit,
       collectionName: COLLECTION_NAME,
+      filter: qdrantFilter,
     });
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");

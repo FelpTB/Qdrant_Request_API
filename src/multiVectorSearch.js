@@ -28,6 +28,7 @@ const QDRANT_VECTOR_NAMES = getQdrantVectorNames();
  * @param {number} params.limitPerVector - top N por dimensão
  * @param {number} params.finalLimit - quantidade final no ranking
  * @param {string} params.collectionName - nome da coleção
+ * @param {object|null} params.filter - filtro Qdrant (must/match), aplicado antes da busca semântica
  * @returns {Promise<Array<{ id: number|string, score_final: number, payload: object, scores: Record<string, number> }>>}
  */
 export async function multiVectorSearch({
@@ -36,20 +37,26 @@ export async function multiVectorSearch({
   limitPerVector,
   finalLimit,
   collectionName,
+  filter = null,
 }) {
   const collection = collectionName;
 
   /** @type {Record<string|number, { id: number|string, payload: object, scores: Record<string, number> }>} */
   const byId = {};
 
+  const searchOpts = {
+    limit: limitPerVector,
+    with_payload: true,
+    with_vector: false,
+    ...(filter && { filter }),
+  };
+
   const searchPromises = DIMENSION_KEYS.map(async (dim, index) => {
     const queryVector = vectors[dim];
     const vectorName = QDRANT_VECTOR_NAMES[index];
     const points = await qdrantClient.search(collection, {
       vector: { name: vectorName, vector: queryVector },
-      limit: limitPerVector,
-      with_payload: true,
-      with_vector: false,
+      ...searchOpts,
     });
     return { dim, points };
   });

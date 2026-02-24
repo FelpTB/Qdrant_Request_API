@@ -17,6 +17,10 @@ Copie `.env` e preencha:
 
 Opcionais: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST` (local use `127.0.0.1` se quiser).
 
+**Filtros de payload** — para aceitar o campo `filter` no POST `/search`, defina `QDRANT_PAYLOAD_KEYS` com as chaves permitidas (as mesmas do payload no banco), ex.:  
+`QDRANT_PAYLOAD_KEYS=nome_empresa,cnpj,industria,modelo_negocio,publico_alvo,cobertura_geografica`  
+O filtro é aplicado **antes** da busca semântica no Qdrant (apenas pontos que atendem às condições entram na busca).
+
 **Se aparecer erro "Not existing vector name error: v_segmento"** — sua coleção pode usar **v_capacidades** em vez de v_segmento (ex.: `v_clientes`, `v_produtos`, `v_capacidades`). Defina no Railway (Variables):  
 `QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes`  
 (ordem: 1º = nome do vetor usado para "segmento" na API, 2º = produtos, 3º = clientes)
@@ -31,6 +35,7 @@ Opcionais: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST` (local use `127.0.0.1` se qu
    - `QDRANT_KEY` — API key do Qdrant Cloud
    - `CLUSTER_ENDPOINT` — URL do cluster (ex.: `https://xxx.sa-east-1-0.aws.cloud.qdrant.io`)
    - `COLLECTION_NAME` — nome da coleção
+   - (Opcional) `QDRANT_PAYLOAD_KEYS` — chaves de payload permitidas para filtro (ex.: `nome_empresa,industria,modelo_negocio`)
    - (Opcional) `SEARCH_TIMEOUT_SECONDS`
    - O Railway define `PORT` automaticamente; não é preciso configurá-lo.
 4. Após o deploy, a URL pública será algo como `https://qdrant-busca-api-production-xxxx.up.railway.app`. Use-a no n8n.
@@ -103,12 +108,17 @@ npm start
     "clientes": 0.3
   },
   "limit_per_vector": 50,
-  "final_limit": 20
+  "final_limit": 20,
+  "filter": {
+    "industria": "Fabricante",
+    "modelo_negocio": "B2B"
+  }
 }
 ```
 
 - Soma de `weights` deve ser `1.0`.
 - Os três vetores são obrigatórios e devem ter a mesma dimensão da coleção.
+- **filter** (opcional): objeto com chaves de payload e valores exatos. Só chaves listadas em `QDRANT_PAYLOAD_KEYS` são aceitas. O filtro é aplicado no Qdrant **antes** da busca por similaridade.
 
 **Resposta (200):**
 
