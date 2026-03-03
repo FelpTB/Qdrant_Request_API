@@ -25,6 +25,8 @@ O filtro é aplicado **antes** da busca semântica no Qdrant (apenas pontos que 
 `QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes`  
 (ordem: 1º = nome do vetor usado para "segmento" na API, 2º = produtos, 3º = clientes)
 
+**Busca híbrida com BM25** — para usar busca lexical (palavras-chave) nos campos `produtos`, `servicos` e `descricao`, a coleção precisa de um vetor esparso BM25. Defina `QDRANT_BM25_VECTOR_NAME` com o nome desse vetor (ex.: `bm25_texto`). No body do POST `/search` use `bm25_query` (string) e opcionalmente `bm25_weight` (0..1, padrão 0.3).
+
 ---
 
 ## Deploy no Railway
@@ -36,6 +38,7 @@ O filtro é aplicado **antes** da busca semântica no Qdrant (apenas pontos que 
    - `CLUSTER_ENDPOINT` — URL do cluster (ex.: `https://xxx.sa-east-1-0.aws.cloud.qdrant.io`)
    - `COLLECTION_NAME` — nome da coleção
    - (Opcional) `QDRANT_PAYLOAD_KEYS` — chaves de payload permitidas para filtro (ex.: `nome_empresa,industria,modelo_negocio`)
+   - (Opcional) `QDRANT_BM25_VECTOR_NAME` — nome do vetor esparso BM25 na coleção (para busca por texto em produtos/serviços/descrição)
    - (Opcional) `SEARCH_TIMEOUT_SECONDS`
    - O Railway define `PORT` automaticamente; não é preciso configurá-lo.
 4. Após o deploy, a URL pública será algo como `https://qdrant-busca-api-production-xxxx.up.railway.app`. Use-a no n8n.
@@ -112,13 +115,17 @@ npm start
   "filter": {
     "industria": "Fabricante",
     "modelo_negocio": "B2B"
-  }
+  },
+  "bm25_query": "tratamento de água ETE",
+  "bm25_weight": 0.3
 }
 ```
 
 - Soma de `weights` deve ser `1.0`.
 - Os três vetores são obrigatórios e devem ter a mesma dimensão da coleção.
 - **filter** (opcional): objeto com chaves de payload e valores exatos. Só chaves listadas em `QDRANT_PAYLOAD_KEYS` são aceitas. O filtro é aplicado no Qdrant **antes** da busca por similaridade.
+- **bm25_query** (opcional): texto para busca BM25. Exige `QDRANT_BM25_VECTOR_NAME`. O vetor esparso deve ter sido construído a partir de `produtos`, `servicos` e `descricao`.
+- **bm25_weight** (opcional): peso do score BM25 na fusão (0 a 1; padrão 0.3).
 
 **Resposta (200):**
 
@@ -129,15 +136,15 @@ npm start
       "id": 123,
       "score_final": 0.85,
       "payload": { "nome_empresa": "...", "cnpj": "...", ... },
-      "scores": { "segmento": 0.9, "produtos": 0.8, "clientes": 0.82 }
+      "scores": { "segmento": 0.9, "produtos": 0.8, "clientes": 0.82, "bm25": 0.75 }
     }
   ]
 }
 ```
 
-Ordenação: `score_final` decrescente.
+Ordenação: `score_final` decrescente. Com `bm25_query`, `scores.bm25` traz o score BM25 e o `score_final` é a combinação ponderada.
 
-**Erros:** `400` (vetor ausente, dimensões inválidas, pesos ≠ 1), `500` (erro no Qdrant).
+**Erros:** `400` (vetor ausente, dimensões inválidas, pesos ≠ 1, bm25_query sem QDRANT_BM25_VECTOR_NAME), `500` (erro no Qdrant).
 
 ### GET `/health`
 

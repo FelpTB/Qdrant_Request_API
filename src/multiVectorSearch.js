@@ -17,10 +17,23 @@ function getQdrantVectorNames() {
   return ["v_segmento", "v_produtos", "v_clientes"];
 }
 
+/** Nome do vetor esparso BM25 na coleção (campos produtos, servicos, descricao). Env: QDRANT_BM25_VECTOR_NAME. */
+function getBm25VectorName() {
+  const env = process.env.QDRANT_BM25_VECTOR_NAME;
+  return env && typeof env === "string" ? env.trim() : null;
+}
+
+/** Modelo de inferência BM25 no Qdrant. Env: QDRANT_BM25_MODEL (default: qdrant/bm25). */
+function getBm25Model() {
+  const env = process.env.QDRANT_BM25_MODEL;
+  return env && typeof env === "string" ? env.trim() : "qdrant/bm25";
+}
+
 const QDRANT_VECTOR_NAMES = getQdrantVectorNames();
 
 /**
  * Executa buscas independentes por cada vetor nomeado e combina os scores com pesos.
+ * Opcionalmente inclui busca BM25 (texto) nos campos produtos, servicos, descricao e funde o score.
  *
  * @param {object} params
  * @param {Record<string, number[]>} params.vectors - { segmento: float[], produtos: float[], clientes: float[] }
@@ -29,6 +42,8 @@ const QDRANT_VECTOR_NAMES = getQdrantVectorNames();
  * @param {number} params.finalLimit - quantidade final no ranking
  * @param {string} params.collectionName - nome da coleção
  * @param {object|null} params.filter - filtro Qdrant (must/match), aplicado antes da busca semântica
+ * @param {string|null} [params.bm25Query] - texto para busca BM25 (vetor esparso; payloads: produtos, servicos, descricao)
+ * @param {number} [params.bm25Weight=0.3] - peso do score BM25 na fusão (0..1); o restante é da busca vetorial
  * @returns {Promise<Array<{ id: number|string, score_final: number, payload: object, scores: Record<string, number> }>>}
  */
 export async function multiVectorSearch({
@@ -38,8 +53,15 @@ export async function multiVectorSearch({
   finalLimit,
   collectionName,
   filter = null,
+  bm25Query = null,
+  bm25Weight = 0.3,
 }) {
   const collection = collectionName;
+  const bm25VectorName = getBm25VectorName();
+  const useBm25 = Boolean(bm25Query && bm25Query.trim() && bm25VectorName);
+  const safeBm25Weight = useBm25
+    ? Math.max(0, Math.min(1, Number(bm25Weight)))
+    : 0;
 
   /** @type {Record<string|number, { id: number|string, payload: object, scores: Record<string, number> }>} */
   const byId = {};
@@ -75,19 +97,62 @@ export async function multiVectorSearch({
         byId[id] = {
           id,
           payload: point.payload ?? {},
-          scores: { segmento: 0, produtos: 0, clientes: 0 },
+          scores: { segmento: 0, produtos: 0, clientes: 0, bm25: 0 },
         };
       }
       byId[id].scores[dim] = point.score ?? 0;
     }
   }
 
+  if (useBm25) {
+    const bm25Limit = Math.max(limitPerVector * 2, finalLimit * 2);
+    const bm25Opts = {
+      query: { text: bm25Query.trim(), model: getBm25Model() },
+      using: bm25VectorName,
+      limit: bm25Limit,
+      with_payload: true,
+      with_vector: false,
+      ...(filter && { filter }),
+    };
+    const bm25Response = await qdrantClient.query(collection, bm25Opts);
+    const bm25Points = Array.isArray(bm25Response)
+      ? bm25Response
+      : (bm25Response?.result?.points ?? bm25Response?.points ?? []);
+    let maxBm25 = 0;
+    for (const point of bm25Points) {
+      let id = point.id;
+      if (typeof id === "object") {
+        if (id.num !== undefined) id = id.num;
+        else if (id.uuid !== undefined) id = id.uuid;
+      }
+      id = typeof id === "number" ? id : String(id);
+      if (!byId[id]) {
+        byId[id] = {
+          id,
+          payload: point.payload ?? {},
+          scores: { segmento: 0, produtos: 0, clientes: 0, bm25: 0 },
+        };
+      }
+      const s = point.score ?? 0;
+      byId[id].scores.bm25 = s;
+      if (s > maxBm25) maxBm25 = s;
+    }
+    const norm = maxBm25 > 0 ? maxBm25 : 1;
+    for (const item of Object.values(byId)) {
+      item.scores.bm25_normalized = item.scores.bm25 / norm;
+    }
+  }
+
+  const vectorWeight = 1 - safeBm25Weight;
   const combined = Object.values(byId).map((item) => {
-    const score_final =
+    const vectorScore =
       item.scores.segmento * weights.segmento +
       item.scores.produtos * weights.produtos +
       item.scores.clientes * weights.clientes;
-    return { ...item, score_final };
+    const bm25Score = item.scores.bm25_normalized ?? 0;
+    const score_final = vectorWeight * vectorScore + safeBm25Weight * bm25Score;
+    const { bm25_normalized: _, ...scores } = item.scores;
+    return { ...item, scores, score_final };
   });
 
   combined.sort((a, b) => b.score_final - a.score_final);

@@ -56,8 +56,16 @@ function validateSearchBody(body) {
   if (!body || typeof body !== "object")
     return { status: 400, message: "Request body inválido" };
 
-  const { vectors, weights, limit_per_vector, final_limit, filter } = body;
+  const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query, bm25_weight } = body;
   const allowedPayloadKeys = getAllowedPayloadKeys();
+
+  if (bm25_query != null && bm25_query !== undefined) {
+    if (typeof bm25_query !== "string")
+      return { status: 400, message: "Campo 'bm25_query' deve ser uma string" };
+    const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim();
+    if (!bm25VectorName)
+      return { status: 400, message: "Para usar BM25 configure QDRANT_BM25_VECTOR_NAME no ambiente (nome do vetor esparso da coleção)" };
+  }
   if (filter != null && filter !== undefined) {
     if (typeof filter !== "object" || Array.isArray(filter))
       return { status: 400, message: "Campo 'filter' deve ser um objeto" };
@@ -109,10 +117,14 @@ app.post("/search", async (req, res) => {
     return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
   }
 
-  const { vectors, weights, limit_per_vector, final_limit, filter } = req.body;
+  const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query, bm25_weight } = req.body;
   const w = normalizeWeights(weights);
   const allowedPayloadKeys = getAllowedPayloadKeys();
   const qdrantFilter = buildQdrantFilter(filter, allowedPayloadKeys);
+  const bm25Weight =
+    bm25_query != null && bm25_query !== ""
+      ? Math.max(0, Math.min(1, Number(bm25_weight ?? 0.3)))
+      : undefined;
 
   try {
     const results = await multiVectorSearch({
@@ -126,6 +138,8 @@ app.post("/search", async (req, res) => {
       finalLimit: final_limit,
       collectionName: COLLECTION_NAME,
       filter: qdrantFilter,
+      bm25Query: typeof bm25_query === "string" ? bm25_query : null,
+      bm25Weight,
     });
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
