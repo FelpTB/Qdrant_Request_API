@@ -29,6 +29,18 @@ function getBm25Model() {
   return env && typeof env === "string" ? env.trim() : "qdrant/bm25";
 }
 
+/** Multiplicador de candidatos BM25 antes da fusão (env: BM25_CANDIDATES_MULTIPLIER, default: 5). */
+function getBm25CandidatesMultiplier() {
+  const n = Number(process.env.BM25_CANDIDATES_MULTIPLIER);
+  return Number.isFinite(n) && n >= 1 ? Math.round(n) : 5;
+}
+
+/** Constante k do RRF: RRF_score = 1 / (k + rank). Env: RRF_K (default: 60). */
+function getRrfK() {
+  const n = Number(process.env.RRF_K);
+  return Number.isFinite(n) && n >= 0 ? n : 60;
+}
+
 const QDRANT_VECTOR_NAMES = getQdrantVectorNames();
 
 /**
@@ -105,7 +117,9 @@ export async function multiVectorSearch({
   }
 
   if (useBm25) {
-    const bm25Limit = Math.max(limitPerVector * 2, finalLimit * 2);
+    const multiplier = getBm25CandidatesMultiplier();
+    const bm25Limit = Math.max(limitPerVector * multiplier, finalLimit * multiplier);
+    const rrfK = getRrfK();
     const bm25Opts = {
       query: { text: bm25Query.trim(), model: getBm25Model() },
       using: bm25VectorName,
@@ -118,8 +132,10 @@ export async function multiVectorSearch({
     const bm25Points = Array.isArray(bm25Response)
       ? bm25Response
       : (bm25Response?.result?.points ?? bm25Response?.points ?? []);
-    let maxBm25 = 0;
-    for (const point of bm25Points) {
+    let maxRrf = 0;
+    bm25Points.forEach((point, index) => {
+      const rank = index + 1;
+      const rrfScore = 1 / (rrfK + rank);
       let id = point.id;
       if (typeof id === "object") {
         if (id.num !== undefined) id = id.num;
@@ -133,13 +149,13 @@ export async function multiVectorSearch({
           scores: { segmento: 0, produtos: 0, clientes: 0, bm25: 0 },
         };
       }
-      const s = point.score ?? 0;
-      byId[id].scores.bm25 = s;
-      if (s > maxBm25) maxBm25 = s;
-    }
-    const norm = maxBm25 > 0 ? maxBm25 : 1;
+      byId[id].scores.bm25 = point.score ?? 0;
+      byId[id].scores.bm25_rrf = rrfScore;
+      if (rrfScore > maxRrf) maxRrf = rrfScore;
+    });
+    const norm = maxRrf > 0 ? maxRrf : 1;
     for (const item of Object.values(byId)) {
-      item.scores.bm25_normalized = item.scores.bm25 / norm;
+      item.scores.bm25_normalized = (item.scores.bm25_rrf ?? 0) / norm;
     }
   }
 
@@ -151,7 +167,7 @@ export async function multiVectorSearch({
       item.scores.clientes * weights.clientes;
     const bm25Score = item.scores.bm25_normalized ?? 0;
     const score_final = vectorWeight * vectorScore + safeBm25Weight * bm25Score;
-    const { bm25_normalized: _, ...scores } = item.scores;
+    const { bm25_normalized: _, bm25_rrf: __, ...scores } = item.scores;
     return { ...item, scores, score_final };
   });
 

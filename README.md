@@ -25,7 +25,7 @@ O filtro é aplicado **antes** da busca semântica no Qdrant (apenas pontos que 
 `QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes`  
 (ordem: 1º = nome do vetor usado para "segmento" na API, 2º = produtos, 3º = clientes)
 
-**Busca híbrida com BM25** — para usar busca lexical (palavras-chave) nos campos `produtos`, `servicos` e `descricao`, a coleção precisa de um vetor esparso BM25. Defina `QDRANT_BM25_VECTOR_NAME` com o nome desse vetor (ex.: `bm25_texto`). No body do POST `/search` use `bm25_query` (string) e opcionalmente `bm25_weight` (0..1, padrão 0.3).
+**Busca híbrida com BM25** — para usar busca lexical (palavras-chave) nos campos `produtos`, `servicos` e `descricao`, a coleção precisa de um vetor esparso BM25. Defina `QDRANT_BM25_VECTOR_NAME` com o nome desse vetor (ex.: `bm25_texto`). No body do POST `/search` use `bm25_query` (string) e opcionalmente `bm25_weight` (0..1, padrão 0.3). O score BM25 é convertido com **RRF** (Reciprocal Rank Fusion, `1/(k+rank)`) antes da fusão, para estabilidade entre consultas. Candidatos BM25 usam multiplicador 5 por padrão (`BM25_CANDIDATES_MULTIPLIER`); opcional `RRF_K` (default 60). Opcionalmente defina `QDRANT_BM25_PAYLOAD_KEYS` com as chaves de payload que alimentam o vetor BM25 (ex.: `descricao,segmento,categoria`); isso é exposto em **GET `/config`** para quem consome a API.
 
 ---
 
@@ -79,7 +79,7 @@ Se os embeddings vierem de nós anteriores (ex.: OpenAI Embeddings ou outro mode
 
 **Resposta:** em `$json.results` você terá o array de empresas ordenadas por `score_final`, cada item com `id`, `score_final`, `payload` (nome_empresa, cnpj, etc.) e `scores` por dimensão.
 
-**Health check no n8n:** use um HTTP Request `GET` em `.../health` para verificar se a API está no ar antes de chamar o `/search`.
+**Health check no n8n:** use um HTTP Request `GET` em `.../health` para verificar se a API está no ar antes de chamar o `/search`. Use **GET `/config`** para listar os payloads e vetores disponíveis (filtro, vetores densos, BM25).
 
 **Teste rápido:** para testar sem embeddings dinâmicos, use no body arrays de mesmo tamanho da sua coleção (ex.: 1536 floats). Pode gerar no n8n com um nó Code que retorne `vectors: { segmento: [...], produtos: [...], clientes: [...] }` ou colar um JSON de teste.
 
@@ -145,6 +145,32 @@ npm start
 Ordenação: `score_final` decrescente. Com `bm25_query`, `scores.bm25` traz o score BM25 e o `score_final` é a combinação ponderada.
 
 **Erros:** `400` (vetor ausente, dimensões inválidas, pesos ≠ 1, bm25_query sem QDRANT_BM25_VECTOR_NAME), `500` (erro no Qdrant).
+
+### GET `/config`
+
+Retorna os payloads e vetores disponíveis conforme as variáveis de ambiente (sem chamar o Qdrant). Útil para saber quais chaves usar em `filter`, quais vetores densos existem e se o BM25 está configurado.
+
+**Resposta (200):**
+
+```json
+{
+  "payload_keys": ["industria", "modelo_negocio", "nome_empresa"],
+  "vector_names": {
+    "segmento": "v_capacidades",
+    "produtos": "v_produtos",
+    "clientes": "v_clientes"
+  },
+  "bm25": {
+    "vector_name": "bm25_texto",
+    "payload_keys": ["descricao", "segmento", "categoria", "subcategoria"]
+  }
+}
+```
+
+- **payload_keys**: chaves de payload permitidas para filtro (variável `QDRANT_PAYLOAD_KEYS`). Use essas chaves no corpo `filter` do POST `/search`.
+- **vector_names**: mapeamento da chave da API (segmento, produtos, clientes) para o nome do vetor na coleção Qdrant (`QDRANT_VECTOR_NAMES`).
+- **bm25.vector_name**: nome do vetor esparso BM25 na coleção (`QDRANT_BM25_VECTOR_NAME`); `null` se não configurado.
+- **bm25.payload_keys**: payloads que alimentam o vetor BM25 (`QDRANT_BM25_PAYLOAD_KEYS`, opcional); `null` se não definido.
 
 ### GET `/health`
 

@@ -15,6 +15,26 @@ function getAllowedPayloadKeys() {
   return env.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+/** Mapeamento chave da API → nome do vetor na coleção Qdrant (env QDRANT_VECTOR_NAMES; ordem: segmento, produtos, clientes). */
+function getVectorNamesMap() {
+  const env = process.env.QDRANT_VECTOR_NAMES;
+  const keys = ["segmento", "produtos", "clientes"];
+  if (env && typeof env === "string") {
+    const names = env.split(",").map((s) => s.trim()).filter(Boolean);
+    if (names.length === 3) {
+      return { segmento: names[0], produtos: names[1], clientes: names[2] };
+    }
+  }
+  return { segmento: "v_segmento", produtos: "v_produtos", clientes: "v_clientes" };
+}
+
+/** Lista de chaves de payload usadas para construir o vetor BM25 (env QDRANT_BM25_PAYLOAD_KEYS, opcional). */
+function getBm25PayloadKeys() {
+  const env = process.env.QDRANT_BM25_PAYLOAD_KEYS;
+  if (!env || typeof env !== "string") return [];
+  return env.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 function normalizeWeights(weights) {
   if (!weights || typeof weights !== "object") return null;
   const w = {
@@ -153,6 +173,24 @@ app.post("/search", async (req, res) => {
         : "Erro no banco vetorial";
     return res.status(status).json({ error: message });
   }
+});
+
+/** Lista payloads e vetores disponíveis conforme variáveis de ambiente (filtro, vetores densos, BM25). */
+app.get("/config", (_req, res) => {
+  const payload_keys = getAllowedPayloadKeys();
+  const vector_names = getVectorNamesMap();
+  const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim() || null;
+  const bm25_payload_keys = getBm25PayloadKeys();
+
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  return res.json({
+    payload_keys,
+    vector_names,
+    bm25: {
+      vector_name: bm25VectorName,
+      payload_keys: bm25_payload_keys.length > 0 ? bm25_payload_keys : null,
+    },
+  });
 });
 
 app.get("/health", (_req, res) => {
