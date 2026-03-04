@@ -1,11 +1,11 @@
 # API de Busca Vetorial Multidimensional (MVP)
 
-API que recebe 3 vetores de embedding (segmento, produtos, clientes), consulta o Qdrant por named vectors e devolve empresas ordenadas por score ponderado.
+API que recebe N vetores de embedding (por padrão 3: segmento, produtos, clientes), consulta o Qdrant por named vectors e devolve empresas ordenadas por score ponderado. Suporta 3 ou 5 (ou mais) vetores via variáveis de ambiente.
 
 ## Requisitos
 
 - Node.js >= 18
-- Coleção Qdrant com vetores nomeados: `v_segmento`, `v_produtos`, `v_clientes` (mesma dimensão, ex.: 1536)
+- Coleção Qdrant com vetores nomeados (ex.: `v_segmento`, `v_produtos`, `v_clientes` ou 5 vetores com nomes configuráveis; mesma dimensão, ex.: 1536)
 
 ## Configuração
 
@@ -21,9 +21,12 @@ Opcionais: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST` (local use `127.0.0.1` se qu
 `QDRANT_PAYLOAD_KEYS=nome_empresa,cnpj,industria,modelo_negocio,publico_alvo,cobertura_geografica`  
 O filtro é aplicado **antes** da busca semântica no Qdrant (apenas pontos que atendem às condições entram na busca).
 
-**Se aparecer erro "Not existing vector name error: v_segmento"** — sua coleção pode usar **v_capacidades** em vez de v_segmento (ex.: `v_clientes`, `v_produtos`, `v_capacidades`). Defina no Railway (Variables):  
+**Se aparecer erro "Not existing vector name error"** — defina `QDRANT_VECTOR_NAMES` com os nomes exatos dos vetores na coleção, na mesma ordem das dimensões. Para **3 vetores** (padrão):  
 `QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes`  
-(ordem: 1º = nome do vetor usado para "segmento" na API, 2º = produtos, 3º = clientes)
+Para **5 vetores**, defina também `QDRANT_DIMENSION_KEYS` com as chaves da API na mesma ordem:  
+`QDRANT_DIMENSION_KEYS=capacidades,produtos,clientes,descricao,servico`  
+`QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes,v_descricao,v_servico`  
+O body do POST `/search` deve ter `vectors` e `weights` com exatamente essas chaves. Use **GET `/config`** para listar `dimension_keys` e `vector_names` configurados.
 
 **Busca híbrida com BM25** — para usar busca lexical (palavras-chave) nos campos `produtos`, `servicos` e `descricao`, a coleção precisa de um vetor esparso BM25. Defina `QDRANT_BM25_VECTOR_NAME` com o nome desse vetor (ex.: `bm25_texto`). No body do POST `/search` use `bm25_query` (string) e opcionalmente `bm25_weight` (0..1, padrão 0.3). O score BM25 é convertido com **RRF** (Reciprocal Rank Fusion, `1/(k+rank)`) antes da fusão, para estabilidade entre consultas. Candidatos BM25 usam multiplicador 5 por padrão (`BM25_CANDIDATES_MULTIPLIER`); opcional `RRF_K` (default 60). Opcionalmente defina `QDRANT_BM25_PAYLOAD_KEYS` com as chaves de payload que alimentam o vetor BM25 (ex.: `descricao,segmento,categoria`); isso é exposto em **GET `/config`** para quem consome a API.
 
@@ -38,7 +41,8 @@ O filtro é aplicado **antes** da busca semântica no Qdrant (apenas pontos que 
    - `CLUSTER_ENDPOINT` — URL do cluster (ex.: `https://xxx.sa-east-1-0.aws.cloud.qdrant.io`)
    - `COLLECTION_NAME` — nome da coleção
    - (Opcional) `QDRANT_PAYLOAD_KEYS` — chaves de payload permitidas para filtro (ex.: `nome_empresa,industria,modelo_negocio`)
-   - (Opcional) `QDRANT_BM25_VECTOR_NAME` — nome do vetor esparso BM25 na coleção (para busca por texto em produtos/serviços/descrição)
+   - (Opcional) `QDRANT_BM25_VECTOR_NAME` — nome do vetor esparso BM25 na coleção (para busca por texto)
+   - (Opcional) **5 vetores:** `QDRANT_DIMENSION_KEYS=capacidades,produtos,clientes,descricao,servico` e `QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes,v_descricao,v_servico` (mesma ordem)
    - (Opcional) `SEARCH_TIMEOUT_SECONDS`
    - O Railway define `PORT` automaticamente; não é preciso configurá-lo.
 4. Após o deploy, a URL pública será algo como `https://qdrant-busca-api-production-xxxx.up.railway.app`. Use-a no n8n.
@@ -122,10 +126,33 @@ npm start
 ```
 
 - Soma de `weights` deve ser `1.0`.
-- Os três vetores são obrigatórios e devem ter a mesma dimensão da coleção.
+- Os vetores são obrigatórios para cada chave em `dimension_keys` (veja GET `/config`). Com 3 dimensões (padrão): `segmento`, `produtos`, `clientes`. Com 5: as chaves definidas em `QDRANT_DIMENSION_KEYS` (ex.: `capacidades`, `produtos`, `clientes`, `descricao`, `servico`). Todos os vetores devem ter a mesma dimensão da coleção.
 - **filter** (opcional): objeto com chaves de payload e valores exatos. Só chaves listadas em `QDRANT_PAYLOAD_KEYS` são aceitas. O filtro é aplicado no Qdrant **antes** da busca por similaridade.
-- **bm25_query** (opcional): texto para busca BM25. Exige `QDRANT_BM25_VECTOR_NAME`. O vetor esparso deve ter sido construído a partir de `produtos`, `servicos` e `descricao`.
+- **bm25_query** (opcional): texto para busca BM25. Exige `QDRANT_BM25_VECTOR_NAME`. O vetor esparso deve ter sido construído a partir dos payloads configurados (ex.: produtos, servicos, descricao).
 - **bm25_weight** (opcional): peso do score BM25 na fusão (0 a 1; padrão 0.3).
+
+**Exemplo com 5 vetores** (quando `QDRANT_DIMENSION_KEYS` e `QDRANT_VECTOR_NAMES` têm 5 itens):
+
+```json
+{
+  "vectors": {
+    "capacidades": [float, ...],
+    "produtos": [float, ...],
+    "clientes": [float, ...],
+    "descricao": [float, ...],
+    "servico": [float, ...]
+  },
+  "weights": {
+    "capacidades": 0.2,
+    "produtos": 0.2,
+    "clientes": 0.2,
+    "descricao": 0.2,
+    "servico": 0.2
+  },
+  "limit_per_vector": 50,
+  "final_limit": 20
+}
+```
 
 **Resposta (200):**
 
@@ -154,6 +181,7 @@ Retorna os payloads e vetores disponíveis conforme as variáveis de ambiente (s
 
 ```json
 {
+  "dimension_keys": ["segmento", "produtos", "clientes"],
   "payload_keys": ["industria", "modelo_negocio", "nome_empresa"],
   "vector_names": {
     "segmento": "v_capacidades",
@@ -167,8 +195,9 @@ Retorna os payloads e vetores disponíveis conforme as variáveis de ambiente (s
 }
 ```
 
+- **dimension_keys**: chaves que devem aparecer em `vectors` e `weights` no POST `/search` (variável `QDRANT_DIMENSION_KEYS` ou padrão segmento, produtos, clientes).
 - **payload_keys**: chaves de payload permitidas para filtro (variável `QDRANT_PAYLOAD_KEYS`). Use essas chaves no corpo `filter` do POST `/search`.
-- **vector_names**: mapeamento da chave da API (segmento, produtos, clientes) para o nome do vetor na coleção Qdrant (`QDRANT_VECTOR_NAMES`).
+- **vector_names**: mapeamento da chave da API para o nome do vetor na coleção Qdrant (`QDRANT_VECTOR_NAMES`).
 - **bm25.vector_name**: nome do vetor esparso BM25 na coleção (`QDRANT_BM25_VECTOR_NAME`); `null` se não configurado.
 - **bm25.payload_keys**: payloads que alimentam o vetor BM25 (`QDRANT_BM25_PAYLOAD_KEYS`, opcional); `null` se não definido.
 

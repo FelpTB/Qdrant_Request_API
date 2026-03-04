@@ -6,26 +6,42 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 const COLLECTION_NAME = process.env.COLLECTION_NAME;
-const REQUIRED_DIMENSIONS = ["segmento", "produtos", "clientes"];
+
+/** Chaves das dimensões da API (env QDRANT_DIMENSION_KEYS). Padrão: segmento,produtos,clientes. Para 5 vetores: ex. capacidades,produtos,clientes,descricao,servico. */
+function getDimensionKeys() {
+  const env = process.env.QDRANT_DIMENSION_KEYS;
+  if (env && typeof env === "string") {
+    const keys = env.split(",").map((s) => s.trim()).filter(Boolean);
+    if (keys.length >= 1) return keys;
+  }
+  return ["segmento", "produtos", "clientes"];
+}
+
+/** Mapeamento chave da API → nome do vetor na coleção Qdrant. QDRANT_VECTOR_NAMES deve ter o mesmo número de nomes que QDRANT_DIMENSION_KEYS (ordem 1:1). */
+function getVectorNamesMap() {
+  const dimensionKeys = getDimensionKeys();
+  const env = process.env.QDRANT_VECTOR_NAMES;
+  if (env && typeof env === "string") {
+    const names = env.split(",").map((s) => s.trim()).filter(Boolean);
+    if (names.length === dimensionKeys.length) {
+      const map = {};
+      dimensionKeys.forEach((key, i) => { map[key] = names[i]; });
+      return map;
+    }
+  }
+  const defaultNames = ["v_segmento", "v_produtos", "v_clientes"];
+  const map = {};
+  dimensionKeys.forEach((key, i) => {
+    map[key] = (defaultNames.length === dimensionKeys.length && defaultNames[i]) ? defaultNames[i] : `v_${key}`;
+  });
+  return map;
+}
 
 /** Lista de chaves de payload permitidas para filtro (env QDRANT_PAYLOAD_KEYS, ex.: nome_empresa,industria,modelo_negocio). */
 function getAllowedPayloadKeys() {
   const env = process.env.QDRANT_PAYLOAD_KEYS;
   if (!env || typeof env !== "string") return [];
   return env.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
-/** Mapeamento chave da API → nome do vetor na coleção Qdrant (env QDRANT_VECTOR_NAMES; ordem: segmento, produtos, clientes). */
-function getVectorNamesMap() {
-  const env = process.env.QDRANT_VECTOR_NAMES;
-  const keys = ["segmento", "produtos", "clientes"];
-  if (env && typeof env === "string") {
-    const names = env.split(",").map((s) => s.trim()).filter(Boolean);
-    if (names.length === 3) {
-      return { segmento: names[0], produtos: names[1], clientes: names[2] };
-    }
-  }
-  return { segmento: "v_segmento", produtos: "v_produtos", clientes: "v_clientes" };
 }
 
 /** Lista de chaves de payload usadas para construir o vetor BM25 (env QDRANT_BM25_PAYLOAD_KEYS, opcional). */
@@ -35,20 +51,19 @@ function getBm25PayloadKeys() {
   return env.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-function normalizeWeights(weights) {
-  if (!weights || typeof weights !== "object") return null;
-  const w = {
-    segmento: Number(weights.segmento),
-    produtos: Number(weights.produtos),
-    clientes: Number(weights.clientes),
-  };
-  if (Number.isNaN(w.segmento) || Number.isNaN(w.produtos) || Number.isNaN(w.clientes))
-    return null;
+function normalizeWeights(weights, dimensionKeys) {
+  if (!weights || typeof weights !== "object" || !Array.isArray(dimensionKeys)) return null;
+  const w = {};
+  for (const dim of dimensionKeys) {
+    const v = Number(weights[dim]);
+    if (Number.isNaN(v)) return null;
+    w[dim] = v;
+  }
   return w;
 }
 
 function sumWeights(w) {
-  return w.segmento + w.produtos + w.clientes;
+  return Object.values(w).reduce((a, b) => a + b, 0);
 }
 
 function isValidVector(arr) {
@@ -99,20 +114,24 @@ function validateSearchBody(body) {
   if (!vectors || typeof vectors !== "object")
     return { status: 400, message: "Campo 'vectors' é obrigatório" };
 
-  for (const dim of REQUIRED_DIMENSIONS) {
+  const dimensionKeys = getDimensionKeys();
+  for (const dim of dimensionKeys) {
     if (!(dim in vectors))
       return { status: 400, message: `Vetor ausente: '${dim}'` };
     if (!isValidVector(vectors[dim]))
       return { status: 400, message: `Vetor '${dim}' inválido ou dimensões incorretas` };
   }
 
-  const dimLength = vectors.segmento.length;
-  if (vectors.produtos.length !== dimLength || vectors.clientes.length !== dimLength)
-    return { status: 400, message: "Dimensões dos vetores devem coincidir" };
+  const firstDim = dimensionKeys[0];
+  const dimLength = vectors[firstDim].length;
+  for (let i = 1; i < dimensionKeys.length; i++) {
+    if (vectors[dimensionKeys[i]].length !== dimLength)
+      return { status: 400, message: "Dimensões dos vetores devem coincidir" };
+  }
 
-  const w = normalizeWeights(weights);
+  const w = normalizeWeights(weights, dimensionKeys);
   if (!w)
-    return { status: 400, message: "Campo 'weights' inválido (segmento, produtos, clientes)" };
+    return { status: 400, message: `Campo 'weights' inválido. Chaves esperadas: ${dimensionKeys.join(", ")}` };
   const sum = sumWeights(w);
   if (Math.abs(sum - 1) > 1e-6)
     return { status: 400, message: "Soma dos pesos deve ser 1.0" };
@@ -138,7 +157,8 @@ app.post("/search", async (req, res) => {
   }
 
   const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query, bm25_weight } = req.body;
-  const w = normalizeWeights(weights);
+  const dimensionKeys = getDimensionKeys();
+  const w = normalizeWeights(weights, dimensionKeys);
   const allowedPayloadKeys = getAllowedPayloadKeys();
   const qdrantFilter = buildQdrantFilter(filter, allowedPayloadKeys);
   const bm25Weight =
@@ -146,14 +166,14 @@ app.post("/search", async (req, res) => {
       ? Math.max(0, Math.min(1, Number(bm25_weight ?? 0.3)))
       : undefined;
 
+  const vectorsForSearch = {};
+  for (const dim of dimensionKeys) vectorsForSearch[dim] = vectors[dim];
+
   try {
     const results = await multiVectorSearch({
-      vectors: {
-        segmento: vectors.segmento,
-        produtos: vectors.produtos,
-        clientes: vectors.clientes,
-      },
+      vectors: vectorsForSearch,
       weights: w,
+      vectorNamesMap: getVectorNamesMap(),
       limitPerVector: limit_per_vector,
       finalLimit: final_limit,
       collectionName: COLLECTION_NAME,
@@ -177,6 +197,7 @@ app.post("/search", async (req, res) => {
 
 /** Lista payloads e vetores disponíveis conforme variáveis de ambiente (filtro, vetores densos, BM25). */
 app.get("/config", (_req, res) => {
+  const dimension_keys = getDimensionKeys();
   const payload_keys = getAllowedPayloadKeys();
   const vector_names = getVectorNamesMap();
   const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim() || null;
@@ -184,6 +205,7 @@ app.get("/config", (_req, res) => {
 
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   return res.json({
+    dimension_keys,
     payload_keys,
     vector_names,
     bm25: {

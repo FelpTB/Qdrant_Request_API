@@ -1,20 +1,16 @@
 import qdrantClient from "./qdrantClient.js";
 
-/** Chaves da API (sempre segmento, produtos, clientes). */
-const DIMENSION_KEYS = ["segmento", "produtos", "clientes"];
-
 /**
  * Nomes reais dos vetores na coleção Qdrant (named vectors).
- * Por padrão: v_segmento, v_produtos, v_clientes.
- * Se a coleção usar outros nomes, defina QDRANT_VECTOR_NAMES no .env, ex.: segmento,produtos,clientes (sem prefixo v_).
+ * Derivado de vectorNamesMap passado pelo server (QDRANT_VECTOR_NAMES / QDRANT_DIMENSION_KEYS).
  */
-function getQdrantVectorNames() {
-  const env = process.env.QDRANT_VECTOR_NAMES;
-  if (env && typeof env === "string") {
-    const names = env.split(",").map((s) => s.trim()).filter(Boolean);
-    if (names.length === 3) return names;
-  }
-  return ["v_segmento", "v_produtos", "v_clientes"];
+function getQdrantVectorNames(vectorNamesMap) {
+  return vectorNamesMap ? Object.values(vectorNamesMap) : ["v_segmento", "v_produtos", "v_clientes"];
+}
+
+/** Chaves das dimensões (ordem consistente). */
+function getDimensionKeysFromMap(vectorNamesMap) {
+  return vectorNamesMap ? Object.keys(vectorNamesMap) : ["segmento", "produtos", "clientes"];
 }
 
 /** Nome do vetor esparso BM25 na coleção (campos produtos, servicos, descricao). Env: QDRANT_BM25_VECTOR_NAME. */
@@ -41,26 +37,26 @@ function getRrfK() {
   return Number.isFinite(n) && n >= 0 ? n : 60;
 }
 
-const QDRANT_VECTOR_NAMES = getQdrantVectorNames();
-
 /**
  * Executa buscas independentes por cada vetor nomeado e combina os scores com pesos.
- * Opcionalmente inclui busca BM25 (texto) nos campos produtos, servicos, descricao e funde o score.
+ * Opcionalmente inclui busca BM25 (texto) e funde o score.
  *
  * @param {object} params
- * @param {Record<string, number[]>} params.vectors - { segmento: float[], produtos: float[], clientes: float[] }
- * @param {Record<string, number>} params.weights - { segmento: float, produtos: float, clientes: float }, soma = 1
+ * @param {Record<string, number[]>} params.vectors - um vetor por dimensão (chaves = dimension_keys)
+ * @param {Record<string, number>} params.weights - peso por dimensão, soma = 1
+ * @param {Record<string, string>} params.vectorNamesMap - mapa chave da API → nome do vetor no Qdrant
  * @param {number} params.limitPerVector - top N por dimensão
  * @param {number} params.finalLimit - quantidade final no ranking
  * @param {string} params.collectionName - nome da coleção
  * @param {object|null} params.filter - filtro Qdrant (must/match), aplicado antes da busca semântica
- * @param {string|null} [params.bm25Query] - texto para busca BM25 (vetor esparso; payloads: produtos, servicos, descricao)
- * @param {number} [params.bm25Weight=0.3] - peso do score BM25 na fusão (0..1); o restante é da busca vetorial
+ * @param {string|null} [params.bm25Query] - texto para busca BM25
+ * @param {number} [params.bm25Weight=0.3] - peso do score BM25 na fusão (0..1)
  * @returns {Promise<Array<{ id: number|string, score_final: number, payload: object, scores: Record<string, number> }>>}
  */
 export async function multiVectorSearch({
   vectors,
   weights,
+  vectorNamesMap,
   limitPerVector,
   finalLimit,
   collectionName,
@@ -68,6 +64,11 @@ export async function multiVectorSearch({
   bm25Query = null,
   bm25Weight = 0.3,
 }) {
+  const dimensionKeys = getDimensionKeysFromMap(vectorNamesMap);
+  const vectorNames = getQdrantVectorNames(vectorNamesMap);
+  if (dimensionKeys.length !== vectorNames.length) {
+    throw new Error("vectorNamesMap: número de chaves deve coincidir com o número de nomes de vetor");
+  }
   const collection = collectionName;
   const bm25VectorName = getBm25VectorName();
   const useBm25 = Boolean(bm25Query && bm25Query.trim() && bm25VectorName);
@@ -85,9 +86,9 @@ export async function multiVectorSearch({
     ...(filter && { filter }),
   };
 
-  const searchPromises = DIMENSION_KEYS.map(async (dim, index) => {
+  const searchPromises = dimensionKeys.map(async (dim, index) => {
     const queryVector = vectors[dim];
-    const vectorName = QDRANT_VECTOR_NAMES[index];
+    const vectorName = vectorNames[index];
     const points = await qdrantClient.search(collection, {
       vector: { name: vectorName, vector: queryVector },
       ...searchOpts,
@@ -96,6 +97,10 @@ export async function multiVectorSearch({
   });
 
   const results = await Promise.all(searchPromises);
+
+  const initialScores = {};
+  dimensionKeys.forEach((dim) => { initialScores[dim] = 0; });
+  initialScores.bm25 = 0;
 
   for (const { dim, points } of results) {
     for (const point of points) {
@@ -109,7 +114,7 @@ export async function multiVectorSearch({
         byId[id] = {
           id,
           payload: point.payload ?? {},
-          scores: { segmento: 0, produtos: 0, clientes: 0, bm25: 0 },
+          scores: { ...initialScores },
         };
       }
       byId[id].scores[dim] = point.score ?? 0;
@@ -146,7 +151,7 @@ export async function multiVectorSearch({
         byId[id] = {
           id,
           payload: point.payload ?? {},
-          scores: { segmento: 0, produtos: 0, clientes: 0, bm25: 0 },
+          scores: { ...initialScores },
         };
       }
       byId[id].scores.bm25 = point.score ?? 0;
@@ -161,10 +166,10 @@ export async function multiVectorSearch({
 
   const vectorWeight = 1 - safeBm25Weight;
   const combined = Object.values(byId).map((item) => {
-    const vectorScore =
-      item.scores.segmento * weights.segmento +
-      item.scores.produtos * weights.produtos +
-      item.scores.clientes * weights.clientes;
+    let vectorScore = 0;
+    for (const dim of dimensionKeys) {
+      vectorScore += (item.scores[dim] ?? 0) * (weights[dim] ?? 0);
+    }
     const bm25Score = item.scores.bm25_normalized ?? 0;
     const score_final = vectorWeight * vectorScore + safeBm25Weight * bm25Score;
     const { bm25_normalized: _, bm25_rrf: __, ...scores } = item.scores;
