@@ -43,14 +43,13 @@ function getRrfK() {
  *
  * @param {object} params
  * @param {Record<string, number[]>} params.vectors - um vetor por dimensão (chaves = dimension_keys)
- * @param {Record<string, number>} params.weights - peso por dimensão, soma = 1
+ * @param {Record<string, number>} params.weights - peso por dimensão (+ bm25 se bm25Query); soma total = 1
  * @param {Record<string, string>} params.vectorNamesMap - mapa chave da API → nome do vetor no Qdrant
  * @param {number} params.limitPerVector - top N por dimensão
  * @param {number} params.finalLimit - quantidade final no ranking
  * @param {string} params.collectionName - nome da coleção
  * @param {object|null} params.filter - filtro Qdrant (must/match), aplicado antes da busca semântica
  * @param {string|null} [params.bm25Query] - texto para busca BM25
- * @param {number} [params.bm25Weight=0.3] - peso do score BM25 na fusão (0..1)
  * @returns {Promise<Array<{ id: number|string, score_final: number, payload: object, scores: Record<string, number> }>>}
  */
 export async function multiVectorSearch({
@@ -62,7 +61,6 @@ export async function multiVectorSearch({
   collectionName,
   filter = null,
   bm25Query = null,
-  bm25Weight = 0.3,
 }) {
   const dimensionKeys = getDimensionKeysFromMap(vectorNamesMap);
   const vectorNames = getQdrantVectorNames(vectorNamesMap);
@@ -72,9 +70,7 @@ export async function multiVectorSearch({
   const collection = collectionName;
   const bm25VectorName = getBm25VectorName();
   const useBm25 = Boolean(bm25Query && bm25Query.trim() && bm25VectorName);
-  const safeBm25Weight = useBm25
-    ? Math.max(0, Math.min(1, Number(bm25Weight)))
-    : 0;
+  const bm25Weight = useBm25 ? (Number(weights.bm25) || 0) : 0;
 
   /** @type {Record<string|number, { id: number|string, payload: object, scores: Record<string, number> }>} */
   const byId = {};
@@ -164,14 +160,12 @@ export async function multiVectorSearch({
     }
   }
 
-  const vectorWeight = 1 - safeBm25Weight;
   const combined = Object.values(byId).map((item) => {
-    let vectorScore = 0;
+    let score_final = 0;
     for (const dim of dimensionKeys) {
-      vectorScore += (item.scores[dim] ?? 0) * (weights[dim] ?? 0);
+      score_final += (item.scores[dim] ?? 0) * (weights[dim] ?? 0);
     }
-    const bm25Score = item.scores.bm25_normalized ?? 0;
-    const score_final = vectorWeight * vectorScore + safeBm25Weight * bm25Score;
+    score_final += bm25Weight * (item.scores.bm25_normalized ?? 0);
     const { bm25_normalized: _, bm25_rrf: __, ...scores } = item.scores;
     return { ...item, scores, score_final };
   });

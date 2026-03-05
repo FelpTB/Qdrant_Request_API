@@ -28,7 +28,7 @@ Para **5 vetores**, defina também `QDRANT_DIMENSION_KEYS` com as chaves da API 
 `QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes,v_descricao,v_servico`  
 O body do POST `/search` deve ter `vectors` e `weights` com exatamente essas chaves. Use **GET `/config`** para listar `dimension_keys` e `vector_names` configurados.
 
-**Busca híbrida com BM25** — para usar busca lexical (palavras-chave) nos campos `produtos`, `servicos` e `descricao`, a coleção precisa de um vetor esparso BM25. Defina `QDRANT_BM25_VECTOR_NAME` com o nome desse vetor (ex.: `bm25_texto`). No body do POST `/search` use `bm25_query` (string) e opcionalmente `bm25_weight` (0..1, padrão 0.3). O score BM25 é convertido com **RRF** (Reciprocal Rank Fusion, `1/(k+rank)`) antes da fusão, para estabilidade entre consultas. Candidatos BM25 usam multiplicador 5 por padrão (`BM25_CANDIDATES_MULTIPLIER`); opcional `RRF_K` (default 60). Opcionalmente defina `QDRANT_BM25_PAYLOAD_KEYS` com as chaves de payload que alimentam o vetor BM25 (ex.: `descricao,segmento,categoria`); isso é exposto em **GET `/config`** para quem consome a API.
+**Busca híbrida com BM25** — para usar busca lexical (palavras-chave) nos campos `produtos`, `servicos` e `descricao`, a coleção precisa de um vetor esparso BM25. Defina `QDRANT_BM25_VECTOR_NAME` com o nome desse vetor (ex.: `bm25_texto`). No body do POST `/search` use `bm25_query` (string) e inclua **`bm25`** em **`weights`** — a soma de **weights (densos + bm25) deve ser 1.0**. O score BM25 é convertido com **RRF** (Reciprocal Rank Fusion, `1/(k+rank)`) antes da fusão. Candidatos BM25 usam multiplicador 5 por padrão (`BM25_CANDIDATES_MULTIPLIER`); opcional `RRF_K` (default 60). Opcionalmente defina `QDRANT_BM25_PAYLOAD_KEYS` com as chaves de payload que alimentam o vetor BM25 (ex.: `descricao,segmento,categoria`); isso é exposto em **GET `/config`** para quem consome a API.
 
 ---
 
@@ -110,9 +110,10 @@ npm start
     "clientes": [float, ...]
   },
   "weights": {
-    "segmento": 0.4,
-    "produtos": 0.3,
-    "clientes": 0.3
+    "segmento": 0.35,
+    "produtos": 0.35,
+    "clientes": 0.2,
+    "bm25": 0.1
   },
   "limit_per_vector": 50,
   "final_limit": 20,
@@ -120,16 +121,14 @@ npm start
     "industria": "Fabricante",
     "modelo_negocio": "B2B"
   },
-  "bm25_query": "tratamento de água ETE",
-  "bm25_weight": 0.3
+  "bm25_query": "tratamento de água ETE"
 }
 ```
 
-- Soma de `weights` deve ser `1.0`.
+- Soma de `weights` deve ser `1.0`. Com BM25, inclua a chave **`bm25`** em `weights` (densos + bm25 = 1).
 - Os vetores são obrigatórios para cada chave em `dimension_keys` (veja GET `/config`). Com 3 dimensões (padrão): `segmento`, `produtos`, `clientes`. Com 5: as chaves definidas em `QDRANT_DIMENSION_KEYS` (ex.: `capacidades`, `produtos`, `clientes`, `descricao`, `servico`). Todos os vetores devem ter a mesma dimensão da coleção.
 - **filter** (opcional): objeto com chaves de payload e valores exatos. Só chaves listadas em `QDRANT_PAYLOAD_KEYS` são aceitas. O filtro é aplicado no Qdrant **antes** da busca por similaridade.
-- **bm25_query** (opcional): texto para busca BM25. Exige `QDRANT_BM25_VECTOR_NAME`. O vetor esparso deve ter sido construído a partir dos payloads configurados (ex.: produtos, servicos, descricao).
-- **bm25_weight** (opcional): peso do score BM25 na fusão (0 a 1; padrão 0.3).
+- **bm25_query** (opcional): texto para busca BM25. Exige `QDRANT_BM25_VECTOR_NAME` e **`weights.bm25`** (soma total = 1).
 
 **Exemplo com 5 vetores** (quando `QDRANT_DIMENSION_KEYS` e `QDRANT_VECTOR_NAMES` têm 5 itens):
 
@@ -171,7 +170,7 @@ npm start
 
 Ordenação: `score_final` decrescente. Com `bm25_query`, `scores.bm25` traz o score BM25 e o `score_final` é a combinação ponderada.
 
-**Erros:** `400` (vetor ausente, dimensões inválidas, pesos ≠ 1, bm25_query sem QDRANT_BM25_VECTOR_NAME), `500` (erro no Qdrant).
+**Erros:** `400` (vetor ausente, dimensões inválidas, soma de pesos ≠ 1, bm25_query sem QDRANT_BM25_VECTOR_NAME ou sem weights.bm25), `500` (erro no Qdrant).
 
 ### GET `/config`
 

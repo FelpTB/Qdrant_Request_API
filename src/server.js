@@ -51,13 +51,18 @@ function getBm25PayloadKeys() {
   return env.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-function normalizeWeights(weights, dimensionKeys) {
+function normalizeWeights(weights, dimensionKeys, includeBm25 = false) {
   if (!weights || typeof weights !== "object" || !Array.isArray(dimensionKeys)) return null;
   const w = {};
   for (const dim of dimensionKeys) {
     const v = Number(weights[dim]);
     if (Number.isNaN(v)) return null;
     w[dim] = v;
+  }
+  if (includeBm25) {
+    const v = Number(weights.bm25);
+    if (Number.isNaN(v) || v < 0) return null;
+    w.bm25 = v;
   }
   return w;
 }
@@ -91,10 +96,12 @@ function validateSearchBody(body) {
   if (!body || typeof body !== "object")
     return { status: 400, message: "Request body inválido" };
 
-  const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query, bm25_weight } = body;
+  const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query } = body;
   const allowedPayloadKeys = getAllowedPayloadKeys();
+  const dimensionKeys = getDimensionKeys();
+  const useBm25 = bm25_query != null && bm25_query !== undefined;
 
-  if (bm25_query != null && bm25_query !== undefined) {
+  if (useBm25) {
     if (typeof bm25_query !== "string")
       return { status: 400, message: "Campo 'bm25_query' deve ser uma string" };
     const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim();
@@ -114,7 +121,6 @@ function validateSearchBody(body) {
   if (!vectors || typeof vectors !== "object")
     return { status: 400, message: "Campo 'vectors' é obrigatório" };
 
-  const dimensionKeys = getDimensionKeys();
   for (const dim of dimensionKeys) {
     if (!(dim in vectors))
       return { status: 400, message: `Vetor ausente: '${dim}'` };
@@ -129,12 +135,14 @@ function validateSearchBody(body) {
       return { status: 400, message: "Dimensões dos vetores devem coincidir" };
   }
 
-  const w = normalizeWeights(weights, dimensionKeys);
+  const w = normalizeWeights(weights, dimensionKeys, useBm25);
   if (!w)
-    return { status: 400, message: `Campo 'weights' inválido. Chaves esperadas: ${dimensionKeys.join(", ")}` };
+    return { status: 400, message: useBm25
+      ? `Campo 'weights' inválido. Chaves esperadas: ${dimensionKeys.join(", ")}, bm25 (soma = 1.0)`
+      : `Campo 'weights' inválido. Chaves esperadas: ${dimensionKeys.join(", ")} (soma = 1.0)` };
   const sum = sumWeights(w);
   if (Math.abs(sum - 1) > 1e-6)
-    return { status: 400, message: "Soma dos pesos deve ser 1.0" };
+    return { status: 400, message: "Soma dos pesos (densos + bm25 quando usado) deve ser 1.0" };
 
   const limitPerVector = Number(limit_per_vector);
   const finalLimit = Number(final_limit);
@@ -156,15 +164,12 @@ app.post("/search", async (req, res) => {
     return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
   }
 
-  const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query, bm25_weight } = req.body;
+  const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query } = req.body;
   const dimensionKeys = getDimensionKeys();
-  const w = normalizeWeights(weights, dimensionKeys);
+  const useBm25 = bm25_query != null && bm25_query !== "";
+  const w = normalizeWeights(weights, dimensionKeys, useBm25);
   const allowedPayloadKeys = getAllowedPayloadKeys();
   const qdrantFilter = buildQdrantFilter(filter, allowedPayloadKeys);
-  const bm25Weight =
-    bm25_query != null && bm25_query !== ""
-      ? Math.max(0, Math.min(1, Number(bm25_weight ?? 0.3)))
-      : undefined;
 
   const vectorsForSearch = {};
   for (const dim of dimensionKeys) vectorsForSearch[dim] = vectors[dim];
@@ -179,7 +184,6 @@ app.post("/search", async (req, res) => {
       collectionName: COLLECTION_NAME,
       filter: qdrantFilter,
       bm25Query: typeof bm25_query === "string" ? bm25_query : null,
-      bm25Weight,
     });
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
