@@ -1,7 +1,7 @@
 import { getPool } from "./db.js";
 
-const SCHEMA = "company_profile";
-const TABLE = "company_profiles";
+const SCHEMA = "busca_fornecedor";
+const TABLE = "company_profile";
 const COLUMN_CNPJ = "cnpj";
 const COLUMN_QDRANT = "qdrant";
 

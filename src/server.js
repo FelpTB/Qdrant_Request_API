@@ -53,7 +53,7 @@ app.use(express.json({ limit: "2mb" }));
 app.post("/company-profiles/mark-vectorized", async (req, res) => {
   if (!isDbConfigured()) {
     return res.status(503).json({
-      error: "DB_URL não configurado; não é possível atualizar company_profiles",
+      error: "DB_URL não configurado; não é possível atualizar company_profile",
     });
   }
   const body = req.body;
