@@ -172,6 +172,21 @@ Ordenação: `score_final` decrescente. Com `bm25_query`, `scores.bm25` traz o s
 
 **Erros:** `400` (vetor ausente, dimensões inválidas, soma de pesos ≠ 1, bm25_query sem QDRANT_BM25_VECTOR_NAME ou sem weights.bm25), `500` (erro no Qdrant).
 
+**Debug (resultado vazio):** adicione `?debug=1` na URL do POST (ex.: `POST /search?debug=1`). A resposta virá com `results` e um objeto `debug`: `points_per_dimension` (quantos pontos cada busca densa e a BM25 retornaram), `total_after_merge` e `returned`. Se todos forem 0, o filtro pode não bater com nenhum ponto ou a coleção está vazia.
+
+### POST `/points/upsert`
+
+Insere pontos na coleção Qdrant (variável `COLLECTION_NAME`) em batch. O body pode ser:
+
+1. **Array no formato do arquivo de lista:** `[ { "point": [ { "id", "payload", "vectors" } ] }, ... ]` ou `[ { "id", "payload", "vectors" }, ... ]`.
+2. **Objeto com lista:** `{ "points": [ ... ], "batch_size": 100 }` — `batch_size` (opcional) é o tamanho de cada lote enviado ao Qdrant (1–500; padrão 100).
+
+Cada ponto deve ter `id`, `payload` (objeto) e `vectors` (objeto com vetores nomeados: arrays de números ou, para BM25, `{ "text": "...", "model": "qdrant/bm25" }`). A API normaliza o JSON e envia em lotes ao Qdrant.
+
+**Resposta (200):** `{ "ok": true, "upserted": N, "batches": M }`.
+
+**Limite do body:** 50 MB por padrão (variável `UPSERT_BODY_LIMIT`). Para listas muito grandes, envie em múltiplas requisições ou aumente o limite.
+
 ### GET `/config`
 
 Retorna os payloads e vetores disponíveis conforme as variáveis de ambiente (sem chamar o Qdrant). Útil para saber quais chaves usar em `filter`, quais vetores densos existem e se o BM25 está configurado.
@@ -208,9 +223,10 @@ Retorna `{ "status": "ok" }`.
 
 ```
 src/
-  server.js          # Express, POST /search, validações
+  server.js          # Express, POST /search, POST /points/upsert, validações
   qdrantClient.js    # Cliente Qdrant (Cloud)
-  multiVectorSearch.js # Busca por v_* e combinação ponderada
+  multiVectorSearch.js # Busca por vetores nomeados e fusão (RRF/BM25)
+  upsertPoints.js    # Normalização e upsert em batch
 .env
 package.json
 ```

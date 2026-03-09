@@ -1,11 +1,51 @@
 import express from "express";
 import { multiVectorSearch } from "./multiVectorSearch.js";
+import { normalizePointsInput, upsertPointsBatch } from "./upsertPoints.js";
 import "dotenv/config";
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
-
 const COLLECTION_NAME = process.env.COLLECTION_NAME;
+
+/** POST /points/upsert usa body grande (lista de pontos); parser próprio antes do global. */
+app.post(
+  "/points/upsert",
+  express.json({ limit: process.env.UPSERT_BODY_LIMIT || "50mb" }),
+  async (req, res) => {
+    if (!COLLECTION_NAME) {
+      return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
+    }
+    const { points: rawPoints, batch_size: batchSize } = req.body || {};
+    const body = Array.isArray(rawPoints) ? rawPoints : req.body;
+    const normalized = normalizePointsInput(body);
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
+    }
+    if (normalized.points.length === 0) {
+      return res.status(400).json({ error: "Nenhum ponto para inserir" });
+    }
+    try {
+      const size = batchSize != null ? Math.max(1, Math.min(500, Number(batchSize))) : undefined;
+      const result = await upsertPointsBatch({
+        collectionName: COLLECTION_NAME,
+        points: normalized.points,
+        batchSize: size,
+        wait: true,
+      });
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      return res.json({ ok: true, ...result });
+    } catch (err) {
+      console.error("Erro no upsert em batch:", err);
+      const status = err.status ?? err.statusCode ?? 500;
+      const message =
+        status === 400 && err.data?.status?.error
+          ? err.data.status.error
+          : "Erro ao inserir pontos no Qdrant";
+      return res.status(status).json({ error: message });
+    }
+  }
+);
+
+app.use(express.json({ limit: "2mb" }));
 
 /** Chaves das dimensões da API (env QDRANT_DIMENSION_KEYS). Padrão: segmento,produtos,clientes. Para 5 vetores: ex. capacidades,produtos,clientes,descricao,servico. */
 function getDimensionKeys() {
@@ -173,9 +213,10 @@ app.post("/search", async (req, res) => {
 
   const vectorsForSearch = {};
   for (const dim of dimensionKeys) vectorsForSearch[dim] = vectors[dim];
+  const debugMode = req.query.debug === "1";
 
   try {
-    const results = await multiVectorSearch({
+    const out = await multiVectorSearch({
       vectors: vectorsForSearch,
       weights: w,
       vectorNamesMap: getVectorNamesMap(),
@@ -184,10 +225,11 @@ app.post("/search", async (req, res) => {
       collectionName: COLLECTION_NAME,
       filter: qdrantFilter,
       bm25Query: typeof bm25_query === "string" ? bm25_query : null,
+      returnDebugCounts: debugMode,
     });
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    return res.json({ results });
+    return res.json(typeof out === "object" && out.results && out.debug ? out : { results: out });
   } catch (err) {
     console.error("Erro na busca vetorial:", err);
     const status = err.status ?? err.statusCode ?? 500;

@@ -50,7 +50,8 @@ function getRrfK() {
  * @param {string} params.collectionName - nome da coleção
  * @param {object|null} params.filter - filtro Qdrant (must/match), aplicado antes da busca semântica
  * @param {string|null} [params.bm25Query] - texto para busca BM25
- * @returns {Promise<Array<{ id: number|string, score_final: number, payload: object, scores: Record<string, number> }>>}
+ * @param {boolean} [params.returnDebugCounts=false] - se true, retorna { results, debug: { points_per_dimension, bm25_points } }
+ * @returns {Promise<Array<...>|{ results: Array<...>, debug: object }>}
  */
 export async function multiVectorSearch({
   vectors,
@@ -61,6 +62,7 @@ export async function multiVectorSearch({
   collectionName,
   filter = null,
   bm25Query = null,
+  returnDebugCounts = false,
 }) {
   const dimensionKeys = getDimensionKeysFromMap(vectorNamesMap);
   const vectorNames = getQdrantVectorNames(vectorNamesMap);
@@ -94,11 +96,15 @@ export async function multiVectorSearch({
 
   const results = await Promise.all(searchPromises);
 
+  const pointsPerDimension = {};
+  dimensionKeys.forEach((dim) => { pointsPerDimension[dim] = 0; });
+
   const initialScores = {};
   dimensionKeys.forEach((dim) => { initialScores[dim] = 0; });
   initialScores.bm25 = 0;
 
   for (const { dim, points } of results) {
+    if (returnDebugCounts) pointsPerDimension[dim] = points?.length ?? 0;
     for (const point of points) {
       let id = point.id;
       if (typeof id === "object") {
@@ -133,6 +139,7 @@ export async function multiVectorSearch({
     const bm25Points = Array.isArray(bm25Response)
       ? bm25Response
       : (bm25Response?.result?.points ?? bm25Response?.points ?? []);
+    if (returnDebugCounts) pointsPerDimension.bm25 = bm25Points.length;
     let maxRrf = 0;
     bm25Points.forEach((point, index) => {
       const rank = index + 1;
@@ -171,5 +178,16 @@ export async function multiVectorSearch({
   });
 
   combined.sort((a, b) => b.score_final - a.score_final);
-  return combined.slice(0, finalLimit);
+  const resultsSlice = combined.slice(0, finalLimit);
+  if (returnDebugCounts) {
+    return {
+      results: resultsSlice,
+      debug: {
+        points_per_dimension: pointsPerDimension,
+        total_after_merge: combined.length,
+        returned: resultsSlice.length,
+      },
+    };
+  }
+  return resultsSlice;
 }
