@@ -35,68 +35,73 @@ async function embedBatch(texts) {
   return order.map((d) => d.embedding);
 }
 
+const VECTOR_KEYS = ["produto", "servico", "descricao", "publico", "cliente"];
+const VECTOR_KEY_TO_NAMED = {
+  produto: "v_produto",
+  servico: "v_servico",
+  descricao: "v_descricao",
+  publico: "v_publico",
+  cliente: "v_cliente",
+};
+
 /**
- * Gera embeddings para os 5 vetores de um conjunto de itens.
- * Cada item tem: produto, servico, descricao, publico, cliente (strings).
- * Faz até 5 chamadas em paralelo (uma por vetor), subdividindo em batches se necessário.
+ * Gera embeddings apenas para os campos preenchidos de cada item.
+ * Cada item pode ter um subconjunto dos 5 vetores (v_produto, v_servico, v_descricao, v_publico, v_cliente).
  *
- * @param {Array<{ produto: string, servico: string, descricao: string, publico: string, cliente: string }>} items
- * @returns {Promise<{ vectors: Array<{ v_produto: number[], v_servico: number[], v_descricao: number[], v_publico: number[], v_cliente: number[] }>, errorCount: number, lastError?: string }>}
+ * @param {Array<{ produto: string, servico: string, descricao: string, publico: string, cliente: string, filledVectorKeys: string[] }>} items
+ * @returns {Promise<{ vectors: Array<Record<string, number[]>>, errorCount: number, lastError?: string }>}
  */
 export async function generateEmbeddingsForItems(items) {
   if (items.length === 0) {
     return { vectors: [], errorCount: 0 };
   }
 
-  const cols = {
-    produto: items.map((i) => i.produto ?? " "),
-    servico: items.map((i) => i.servico ?? " "),
-    descricao: items.map((i) => i.descricao ?? " "),
-    publico: items.map((i) => i.publico ?? " "),
-    cliente: items.map((i) => i.cliente ?? " "),
-  };
-
   let errorCount = 0;
   let lastError = null;
 
   const runOne = async (key) => {
-    const texts = cols[key];
+    const named = VECTOR_KEY_TO_NAMED[key];
+    const list = [];
+    for (let i = 0; i < items.length; i++) {
+      const filled = items[i].filledVectorKeys;
+      const text = items[i][key];
+      if (filled && filled.includes(key) && text != null && String(text).trim() !== "") {
+        list.push({ index: i, text: String(text).trim() });
+      }
+    }
+    if (list.length === 0) return [];
+    const texts = list.map((x) => x.text);
     const allEmbeddings = [];
-    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-      const chunk = texts.slice(i, i + BATCH_SIZE);
+    for (let j = 0; j < texts.length; j += BATCH_SIZE) {
+      const chunk = texts.slice(j, j + BATCH_SIZE);
       try {
         const vecs = await embedBatch(chunk);
         allEmbeddings.push(...vecs);
       } catch (err) {
         errorCount += 1;
         lastError = err.message || String(err);
-        for (let j = 0; j < chunk.length; j++) {
+        for (let k = 0; k < chunk.length; k++) {
           allEmbeddings.push([]);
         }
       }
     }
-    return allEmbeddings;
+    return list.map((x, idx) => ({ index: x.index, vec: allEmbeddings[idx] || [] }));
   };
 
-  const [v_produto, v_servico, v_descricao, v_publico, v_cliente] = await Promise.all([
-    runOne("produto"),
-    runOne("servico"),
-    runOne("descricao"),
-    runOne("publico"),
-    runOne("cliente"),
-  ]);
+  const results = await Promise.all(VECTOR_KEYS.map((key) => runOne(key)));
 
   const vectors = [];
-  const n = items.length;
-  for (let i = 0; i < n; i++) {
-    vectors.push({
-      v_produto: v_produto[i] || [],
-      v_servico: v_servico[i] || [],
-      v_descricao: v_descricao[i] || [],
-      v_publico: v_publico[i] || [],
-      v_cliente: v_cliente[i] || [],
-    });
+  for (let i = 0; i < items.length; i++) {
+    vectors[i] = {};
   }
+  results.forEach((keyResults, keyIdx) => {
+    const named = VECTOR_KEY_TO_NAMED[VECTOR_KEYS[keyIdx]];
+    for (const { index, vec } of keyResults) {
+      if (vec && vec.length > 0) {
+        vectors[index][named] = vec;
+      }
+    }
+  });
 
   return { vectors, errorCount, lastError };
 }

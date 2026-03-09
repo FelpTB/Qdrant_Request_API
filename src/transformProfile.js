@@ -30,20 +30,9 @@ function clean(value) {
 }
 
 /**
- * Filtro Filter2 (n8n): pelo menos um de produto, servico, descricao, publico, cliente não vazio.
- * @param {Record<string, string>} p
- * @returns {boolean}
- */
-function hasAnyMainField(p) {
-  return [p.produto, p.servico, p.descricao, p.publico, p.cliente].some(
-    (v) => v != null && String(v).trim() !== ""
-  );
-}
-
-/**
- * Filtro Filter3 (n8n): modelo_negocio não vazio.
- * @param {Record<string, string>} p
- * @returns {boolean}
+ * Filtro: modelo_negocio não vazio (único critério para incluir).
+ * Filtro: modelo_negocio não vazio (único critério para incluir).
+ * Apenas os vetores cujos campos estão preenchidos são gerados e enviados ao Qdrant.
  */
 function hasModeloNegocio(p) {
   const v = p.modelo_negocio;
@@ -55,7 +44,7 @@ function hasModeloNegocio(p) {
  * Não aplica filtros; apenas a transformação.
  *
  * @param {object} row - linha do SELECT (cnpj, full_profile, created_at, updated_at, municipio, uf)
- * @returns {{ cnpj: string, produto: string, servico: string, descricao: string, publico: string, cliente: string, payload: object, bm25Text: string }}
+ * @returns {{ cnpj: string, produto: string, servico: string, descricao: string, publico: string, cliente: string, payload: object, bm25Text: string, filledVectorKeys: string[] }}
  */
 export function transformRow(row) {
   const fp = row.full_profile || {};
@@ -112,13 +101,20 @@ export function transformRow(row) {
     updated_at: row.updated_at,
   };
 
-  const produto = produtos || " ";
-  const servico = servicos || " ";
-  const desc = descricao || " ";
-  const pub = publico || " ";
-  const cliente = clientes || " ";
+  const produto = produtos.trim() || "";
+  const servico = servicos.trim() || "";
+  const desc = descricao.trim() || "";
+  const pub = publico.trim() || "";
+  const cliente = clientes.trim() || "";
 
-  const bm25Text = [produto, servico, desc, pub, cliente].join(" ").trim() || " ";
+  const filledVectorKeys = [];
+  if (produto) filledVectorKeys.push("produto");
+  if (servico) filledVectorKeys.push("servico");
+  if (desc) filledVectorKeys.push("descricao");
+  if (pub) filledVectorKeys.push("publico");
+  if (cliente) filledVectorKeys.push("cliente");
+
+  const bm25Text = [produto, servico, desc, pub, cliente].filter(Boolean).join(" ").trim() || " ";
 
   return {
     cnpj: payload.cnpj,
@@ -129,14 +125,16 @@ export function transformRow(row) {
     cliente,
     payload,
     bm25Text,
+    filledVectorKeys,
   };
 }
 
 /**
- * Aplica transformação a todas as linhas e filtra (Filter2 + Filter3).
+ * Aplica transformação a todas as linhas e filtra apenas por modelo_negocio.
+ * Perfis com informações vazias são inseridos; apenas os vetores cujos campos estão preenchidos são gerados e enviados.
  *
  * @param {Array<object>} rows - resultado de fetchCompanyProfiles
- * @returns {{ items: Array<{ cnpj: string, produto: string, servico: string, descricao: string, publico: string, cliente: string, payload: object, bm25Text: string }>, fetched: number, after_transform: number }}
+ * @returns {{ items: Array<{ cnpj: string, produto: string, servico: string, descricao: string, publico: string, cliente: string, payload: object, bm25Text: string, filledVectorKeys: string[] }>, fetched: number, after_transform: number }}
  */
 export function transformAndFilter(rows) {
   const fetched = rows.length;
@@ -144,7 +142,6 @@ export function transformAndFilter(rows) {
   for (const row of rows) {
     const item = transformRow(row);
     const p = item.payload;
-    if (!hasAnyMainField(p)) continue;
     if (!hasModeloNegocio(p)) continue;
     items.push(item);
   }

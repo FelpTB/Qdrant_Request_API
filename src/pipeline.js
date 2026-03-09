@@ -27,26 +27,27 @@ function pointIdFromCnpj(cnpj) {
 
 /**
  * Monta um ponto Qdrant a partir de item transformado e vetores.
+ * Inclui apenas os named vectors que existem em vecs (campos preenchidos).
+ * Se não houver nenhum vetor denso, retorna null (ponto não inserido).
+ *
  * @param {object} item - item com payload, bm25Text, cnpj
- * @param {object} vecs - { v_produto, v_servico, v_descricao, v_publico, v_cliente }
- * @returns {object} point { id, payload, vectors }
+ * @param {Record<string, number[]>} vecs - ex.: { v_produto, v_descricao } (apenas os preenchidos)
+ * @returns {object | null} point { id, payload, vectors } ou null
  */
 function buildPoint(item, vecs) {
+  const denseKeys = Object.keys(vecs || {}).filter((k) => k.startsWith("v_") && Array.isArray(vecs[k]) && vecs[k].length > 0);
+  if (denseKeys.length === 0) return null;
+
   const id = pointIdFromCnpj(item.cnpj);
+  const vectors = { ...vecs };
+  vectors.bm25_complete_profile = {
+    text: item.bm25Text || " ",
+    model: "qdrant/bm25",
+  };
   return {
     id,
     payload: item.payload,
-    vectors: {
-      v_produto: vecs.v_produto,
-      v_servico: vecs.v_servico,
-      v_descricao: vecs.v_descricao,
-      v_publico: vecs.v_publico,
-      v_cliente: vecs.v_cliente,
-      bm25_complete_profile: {
-        text: item.bm25Text || " ",
-        model: "qdrant/bm25",
-      },
-    },
+    vectors,
   };
 }
 
@@ -144,7 +145,7 @@ export async function runPipeline(limit) {
       }
       pipelineState.embed.success += chunk.length;
 
-      const points = chunk.map((item, i) => buildPoint(item, vectors[i] || {}));
+      const points = chunk.map((item, i) => buildPoint(item, vectors[i] || {})).filter(Boolean);
 
       const t0Upsert = Date.now();
       const upsertResult = await upsertPointsBatch({
@@ -159,7 +160,7 @@ export async function runPipeline(limit) {
       pipelineState.upsert.success += upsertResult.upserted;
       pipelineState.upsert.batches += upsertResult.batches;
 
-      const cnpjs = chunk.map((item) => item.cnpj).filter(Boolean);
+      const cnpjs = points.map((p) => p.payload?.cnpj).filter(Boolean);
       const t0Mark = Date.now();
       const markResult = await markAsVectorized(cnpjs);
       pipelineState.mark.duration_ms += Date.now() - t0Mark;
