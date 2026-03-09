@@ -7,7 +7,9 @@ import { getPool } from "./db.js";
 
 const COLLECTION_NAME = process.env.COLLECTION_NAME;
 const PIPELINE_CHUNK_SIZE = Math.min(1000, Math.max(50, parseInt(process.env.PIPELINE_CHUNK_SIZE, 10) || 200));
-const UPSERT_BATCH_SIZE = Math.min(500, Math.max(1, parseInt(process.env.UPSERT_BATCH_SIZE, 10) || 100));
+const UPSERT_BATCH_SIZE = Math.min(1000, Math.max(1, parseInt(process.env.UPSERT_BATCH_SIZE, 10) || 500));
+const UPSERT_WAIT = process.env.QDRANT_UPSERT_WAIT === "true";
+const UPSERT_CONCURRENCY = Math.min(8, Math.max(1, parseInt(process.env.QDRANT_UPSERT_CONCURRENCY, 10) || 3));
 
 /**
  * Gera id numérico estável a partir do CNPJ (idempotência no Qdrant).
@@ -149,7 +151,8 @@ export async function runPipeline(limit) {
         collectionName: COLLECTION_NAME,
         points,
         batchSize: UPSERT_BATCH_SIZE,
-        wait: true,
+        wait: UPSERT_WAIT,
+        concurrency: UPSERT_CONCURRENCY,
       });
       pipelineState.upsert.duration_ms += Date.now() - t0Upsert;
       pipelineState.upsert.total += points.length;

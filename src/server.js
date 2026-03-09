@@ -33,12 +33,13 @@ app.post(
     }
     const start = Date.now();
     try {
-      const size = batchSize != null ? Math.max(1, Math.min(500, Number(batchSize))) : undefined;
+      const size = batchSize != null ? Math.max(1, Math.min(1000, Number(batchSize))) : undefined;
       const result = await upsertPointsBatch({
         collectionName: COLLECTION_NAME,
         points: normalized.points,
         batchSize: size,
         wait: true,
+        concurrency: 1,
       });
       logSuccess(ENDPOINT_UPSERT, "Inserção no Qdrant concluída", {
         collection: COLLECTION_NAME,

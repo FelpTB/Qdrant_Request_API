@@ -1,7 +1,8 @@
 import OpenAI from "openai";
 
 const MODEL = "text-embedding-3-small";
-const BATCH_SIZE = Math.min(2048, Math.max(1, parseInt(process.env.OPENAI_EMBED_BATCH_SIZE, 10) || 100));
+/** Textos por request (OpenAI aceita até 2048; batch maior = menos requests, respeitar RPM do tier). */
+const BATCH_SIZE = Math.min(2048, Math.max(1, parseInt(process.env.OPENAI_EMBED_BATCH_SIZE, 10) || 200));
 
 let client = null;
 

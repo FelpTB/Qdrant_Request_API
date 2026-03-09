@@ -1,6 +1,12 @@
 import qdrantClient from "./qdrantClient.js";
 
 const DEFAULT_BATCH_SIZE = 100;
+/** Máximo de pontos por request (Qdrant recomenda 1k–10k para ingest; 1k seguro no free tier). */
+const MAX_BATCH_SIZE = Math.min(2000, Math.max(500, parseInt(process.env.QDRANT_UPSERT_MAX_BATCH, 10) || 1000));
+/** Concorrência de upserts (requests em paralelo). Free tier: 2–4 para não estourar rate limit. */
+const DEFAULT_UPSERT_CONCURRENCY = Math.min(8, Math.max(1, parseInt(process.env.QDRANT_UPSERT_CONCURRENCY, 10) || 1));
+/** Aguardar indexação (false = retorno rápido; true = consistência forte). Pipeline usa false por padrão. */
+const DEFAULT_WAIT = process.env.QDRANT_UPSERT_WAIT !== "true";
 
 /**
  * Normaliza o body para um array de pontos.
@@ -46,44 +52,72 @@ export function normalizePointsInput(body) {
 
 /**
  * Insere pontos na coleção Qdrant em lotes.
+ * Suporta concorrência limitada (várias requisições em paralelo) e wait=false para maior throughput.
  *
  * @param {object} params
  * @param {string} params.collectionName - nome da coleção (ex.: COLLECTION_NAME)
  * @param {Array<{ id: number|string, payload: object, vectors: object }>} params.points - pontos no formato Qdrant (vectors = named vectors)
  * @param {number} [params.batchSize=100] - tamanho do lote por requisição
- * @param {boolean} [params.wait=true] - aguardar indexação
+ * @param {boolean} [params.wait] - aguardar indexação (default: QDRANT_UPSERT_WAIT env ou false)
+ * @param {number} [params.concurrency=1] - quantas requisições de upsert em paralelo (1 = sequencial)
  * @returns {Promise<{ upserted: number, batches: number, error?: string }>}
  */
 export async function upsertPointsBatch({
   collectionName,
   points,
   batchSize = DEFAULT_BATCH_SIZE,
-  wait = true,
+  wait = DEFAULT_WAIT,
+  concurrency = DEFAULT_UPSERT_CONCURRENCY,
 }) {
   if (!collectionName || !points || points.length === 0) {
     return { upserted: 0, batches: 0 };
   }
 
-  const size = Math.max(1, Math.min(batchSize, 500));
-  let upserted = 0;
-  const totalBatches = Math.ceil(points.length / size);
-
+  const size = Math.max(1, Math.min(batchSize, MAX_BATCH_SIZE));
+  const batches = [];
   for (let i = 0; i < points.length; i += size) {
-    const batch = points.slice(i, i + size);
-    const batchIndex = Math.floor(i / size) + 1;
-    try {
-      await qdrantClient.upsert(collectionName, {
-        wait,
-        points: batch,
-      });
-      upserted += batch.length;
-    } catch (err) {
-      err.batchIndex = batchIndex;
-      err.totalBatches = totalBatches;
-      err.collectionName = collectionName;
-      throw err;
-    }
+    batches.push(points.slice(i, i + size));
   }
 
-  return { upserted, batches: totalBatches };
+  const safeConcurrency = Math.max(1, Math.min(concurrency, batches.length));
+  let upserted = 0;
+
+  if (safeConcurrency <= 1) {
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      try {
+        await qdrantClient.upsert(collectionName, { wait, points: batch });
+        upserted += batch.length;
+      } catch (err) {
+        err.batchIndex = i + 1;
+        err.totalBatches = batches.length;
+        err.collectionName = collectionName;
+        throw err;
+      }
+    }
+  } else {
+    let nextIndex = 0;
+    let workerError = null;
+    async function worker() {
+      while (workerError == null && nextIndex < batches.length) {
+        const i = nextIndex++;
+        const batch = batches[i];
+        if (!batch.length) continue;
+        try {
+          await qdrantClient.upsert(collectionName, { wait, points: batch });
+          upserted += batch.length;
+        } catch (err) {
+          workerError = err;
+          err.batchIndex = i + 1;
+          err.totalBatches = batches.length;
+          err.collectionName = collectionName;
+          throw err;
+        }
+      }
+    }
+    const workers = Array.from({ length: safeConcurrency }, () => worker());
+    await Promise.all(workers);
+  }
+
+  return { upserted, batches: batches.length };
 }

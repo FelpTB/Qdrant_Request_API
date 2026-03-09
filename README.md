@@ -245,7 +245,9 @@ A API pode executar o fluxo completo **Busca empresas (Supabase) → Embeddings 
 - **GET `/pipeline/stream`** — Server-Sent Events: envia o estado a cada ~1,5 s enquanto o pipeline está em execução; encerra ao completar ou falhar.
 - **GET `/pipeline/dashboard`** — Página HTML que conecta ao stream e exibe tempo de processo e taxa de sucesso de cada etapa; inclui formulário para iniciar o pipeline com um limite.
 
-Variáveis opcionais: `OPENAI_EMBED_BATCH_SIZE` (padrão 100), `PIPELINE_CHUNK_SIZE` (empresas por rodada, padrão 200), `UPSERT_BATCH_SIZE` (padrão 100).
+Variáveis opcionais: `OPENAI_EMBED_BATCH_SIZE` (padrão 200), `PIPELINE_CHUNK_SIZE` (padrão 200), `UPSERT_BATCH_SIZE` (padrão 500), `QDRANT_UPSERT_WAIT` (padrão false = não espera indexação, maior throughput), `QDRANT_UPSERT_CONCURRENCY` (padrão 3 = até 3 upserts em paralelo), `QDRANT_UPSERT_MAX_BATCH` (máx. pontos por request, padrão 1000).
+
+**Performance e limites (plano gratuito):** Qdrant Cloud free tier tem 1 GB de armazenamento; rate limits não são documentados — use `QDRANT_UPSERT_CONCURRENCY=2` ou `3` para não sobrecarregar. Com `QDRANT_UPSERT_WAIT=false` o tempo de upsert cai bastante (indexação em background). OpenAI: respeite RPM/TPM do seu tier (ex.: Tier 1 ~500 RPM); batch de embeddings 200 reduz o número de requests.
 
 ## Estrutura do projeto
 
