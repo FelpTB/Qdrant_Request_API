@@ -1,6 +1,8 @@
 import express from "express";
 import { multiVectorSearch } from "./multiVectorSearch.js";
 import { normalizePointsInput, upsertPointsBatch } from "./upsertPoints.js";
+import { markAsVectorized } from "./markVectorized.js";
+import { isDbConfigured } from "./db.js";
 import "dotenv/config";
 
 const app = express();
@@ -46,6 +48,36 @@ app.post(
 );
 
 app.use(express.json({ limit: "2mb" }));
+
+/** Marca perfis como vetorizados no PostgreSQL (qdrant = true) por lista de CNPJ. Resposta síncrona ao fim da atualização. */
+app.post("/company-profiles/mark-vectorized", async (req, res) => {
+  if (!isDbConfigured()) {
+    return res.status(503).json({
+      error: "DB_URL não configurado; não é possível atualizar company_profiles",
+    });
+  }
+  const body = req.body;
+  const cnpjs = Array.isArray(body) ? body : (body && body.cnpjs);
+  if (!Array.isArray(cnpjs)) {
+    return res.status(400).json({
+      error: "Body deve ser um array de CNPJ ou um objeto { cnpjs: string[] }",
+    });
+  }
+  try {
+    const result = await markAsVectorized(cnpjs);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.json({
+      ok: true,
+      message: "Perfis marcados como vetorizados. Pode prosseguir com a próxima leva.",
+      ...result,
+    });
+  } catch (err) {
+    console.error("Erro ao marcar perfis como vetorizados:", err);
+    const status = err.code === "ECONNREFUSED" ? 503 : (err.status ?? err.statusCode ?? 500);
+    const message = err.message || "Erro ao atualizar banco de dados";
+    return res.status(status).json({ error: message });
+  }
+});
 
 /** Chaves das dimensões da API (env QDRANT_DIMENSION_KEYS). Padrão: segmento,produtos,clientes. Para 5 vetores: ex. capacidades,produtos,clientes,descricao,servico. */
 function getDimensionKeys() {

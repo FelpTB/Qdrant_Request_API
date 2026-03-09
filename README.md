@@ -17,6 +17,8 @@ Copie `.env` e preencha:
 
 Opcionais: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST` (local use `127.0.0.1` se quiser).
 
+**PostgreSQL (marcação de vetorizados)** — para o endpoint POST `/company-profiles/mark-vectorized` funcionar, defina `DB_URL` com a connection string do banco (ex.: `postgres://user:pass@host:5432/dbname`). A API atualiza a coluna `qdrant` para `true` na tabela `busca_fornecedor.company_profiles` para os CNPJs enviados. Opcionais: `DB_POOL_SIZE` (máx. conexões no pool, padrão 10), `MARK_VECTORIZED_CHUNK_SIZE` (CNPJs por lote, padrão 1000), `MARK_VECTORIZED_CONCURRENCY` (até 8 workers em paralelo).
+
 **Filtros de payload** — para aceitar o campo `filter` no POST `/search`, defina `QDRANT_PAYLOAD_KEYS` com as chaves permitidas (as mesmas do payload no banco), ex.:  
 `QDRANT_PAYLOAD_KEYS=nome_empresa,cnpj,industria,modelo_negocio,publico_alvo,cobertura_geografica`  
 O filtro é aplicado **antes** da busca semântica no Qdrant (apenas pontos que atendem às condições entram na busca).
@@ -42,6 +44,7 @@ O body do POST `/search` deve ter `vectors` e `weights` com exatamente essas cha
    - `COLLECTION_NAME` — nome da coleção
    - (Opcional) `QDRANT_PAYLOAD_KEYS` — chaves de payload permitidas para filtro (ex.: `nome_empresa,industria,modelo_negocio`)
    - (Opcional) `QDRANT_BM25_VECTOR_NAME` — nome do vetor esparso BM25 na coleção (para busca por texto)
+   - (Opcional) `DB_URL` — connection string PostgreSQL para POST `/company-profiles/mark-vectorized`
    - (Opcional) **5 vetores:** `QDRANT_DIMENSION_KEYS=capacidades,produtos,clientes,descricao,servico` e `QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes,v_descricao,v_servico` (mesma ordem)
    - (Opcional) `SEARCH_TIMEOUT_SECONDS`
    - O Railway define `PORT` automaticamente; não é preciso configurá-lo.
@@ -219,14 +222,28 @@ Retorna os payloads e vetores disponíveis conforme as variáveis de ambiente (s
 
 Retorna `{ "status": "ok" }`.
 
+### POST `/company-profiles/mark-vectorized`
+
+Marca perfis como vetorizados no PostgreSQL: atualiza `busca_fornecedor.company_profiles` setando `qdrant = true` onde `cnpj` está na lista enviada. Resposta **síncrona** — a API só responde após concluir todas as atualizações, para o fluxo de vetorização poder prosseguir na ordem correta.
+
+**Requisito:** variável de ambiente `DB_URL` (connection string PostgreSQL).
+
+**Body (JSON):** `{ "cnpjs": ["12345678", "87654321", ...] }` ou array direto `["12345678", ...]`. CNPJs são normalizados (trim, únicos).
+
+**Resposta (200):** `{ "ok": true, "message": "Perfis marcados como vetorizados. Pode prosseguir com a próxima leva.", "updated": N, "chunks": M, "concurrency": K }`.
+
+**Otimização:** a lista é processada em chunks (padrão 1000 CNPJs por UPDATE) com até 8 workers em paralelo, sem estourar o pool de conexões. Só linhas com `qdrant` false ou null são atualizadas.
+
 ## Estrutura do projeto
 
 ```
 src/
-  server.js          # Express, POST /search, POST /points/upsert, validações
+  server.js          # Express, POST /search, /points/upsert, /company-profiles/mark-vectorized
   qdrantClient.js    # Cliente Qdrant (Cloud)
   multiVectorSearch.js # Busca por vetores nomeados e fusão (RRF/BM25)
-  upsertPoints.js    # Normalização e upsert em batch
+  upsertPoints.js    # Normalização e upsert em batch no Qdrant
+  db.js              # Pool PostgreSQL (DB_URL)
+  markVectorized.js  # Atualização em batch de qdrant=true por CNPJ
 .env
 package.json
 ```
