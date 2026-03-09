@@ -1,6 +1,6 @@
 import { getPool } from "./db.js";
 
-const SCHEMA = "busca_fornecedor";
+const SCHEMA = "company_profile";
 const TABLE = "company_profiles";
 const COLUMN_CNPJ = "cnpj";
 const COLUMN_QDRANT = "qdrant";

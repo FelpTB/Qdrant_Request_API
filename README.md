@@ -17,7 +17,7 @@ Copie `.env` e preencha:
 
 Opcionais: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST` (local use `127.0.0.1` se quiser).
 
-**PostgreSQL (marcação de vetorizados)** — para o endpoint POST `/company-profiles/mark-vectorized` funcionar, defina `DB_URL` com a connection string do banco (ex.: `postgres://user:pass@host:5432/dbname`). A API atualiza a coluna `qdrant` para `true` na tabela `busca_fornecedor.company_profiles` para os CNPJs enviados. Opcionais: `DB_POOL_SIZE` (máx. conexões no pool, padrão 10), `MARK_VECTORIZED_CHUNK_SIZE` (CNPJs por lote, padrão 1000), `MARK_VECTORIZED_CONCURRENCY` (até 8 workers em paralelo).
+**PostgreSQL (marcação de vetorizados)** — para o endpoint POST `/company-profiles/mark-vectorized` funcionar, defina `DB_URL` com a connection string do banco (ex.: `postgres://user:pass@host:5432/dbname`). A API atualiza a coluna `qdrant` para `true` na tabela `company_profile.company_profiles` para os CNPJs enviados. Opcionais: `DB_POOL_SIZE` (máx. conexões no pool, padrão 10), `MARK_VECTORIZED_CHUNK_SIZE` (CNPJs por lote, padrão 1000), `MARK_VECTORIZED_CONCURRENCY` (até 8 workers em paralelo).
 
 **Filtros de payload** — para aceitar o campo `filter` no POST `/search`, defina `QDRANT_PAYLOAD_KEYS` com as chaves permitidas (as mesmas do payload no banco), ex.:  
 `QDRANT_PAYLOAD_KEYS=nome_empresa,cnpj,industria,modelo_negocio,publico_alvo,cobertura_geografica`  
@@ -224,7 +224,7 @@ Retorna `{ "status": "ok" }`.
 
 ### POST `/company-profiles/mark-vectorized`
 
-Marca perfis como vetorizados no PostgreSQL: atualiza `busca_fornecedor.company_profiles` setando `qdrant = true` onde `cnpj` está na lista enviada. Resposta **síncrona** — a API só responde após concluir todas as atualizações, para o fluxo de vetorização poder prosseguir na ordem correta.
+Marca perfis como vetorizados no PostgreSQL: atualiza `company_profile.company_profiles` setando `qdrant = true` onde `cnpj` está na lista enviada. Resposta **síncrona** — a API só responde após concluir todas as atualizações, para o fluxo de vetorização poder prosseguir na ordem correta.
 
 **Requisito:** variável de ambiente `DB_URL` (connection string PostgreSQL).
 
