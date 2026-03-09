@@ -43,8 +43,15 @@ async function runChunksWithLimit(pool, chunks, concurrency) {
       const i = index++;
       const chunk = chunks[i];
       if (!chunk || chunk.length === 0) continue;
-      const count = await runChunk(pool, chunk);
-      total += count;
+      try {
+        const count = await runChunk(pool, chunk);
+        total += count;
+      } catch (err) {
+        err.chunkIndex = i + 1;
+        err.totalChunks = chunks.length;
+        err.cnpjsInChunk = chunk.length;
+        throw err;
+      }
     }
   }
 

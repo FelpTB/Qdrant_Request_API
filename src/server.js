@@ -3,10 +3,14 @@ import { multiVectorSearch } from "./multiVectorSearch.js";
 import { normalizePointsInput, upsertPointsBatch } from "./upsertPoints.js";
 import { markAsVectorized } from "./markVectorized.js";
 import { isDbConfigured } from "./db.js";
+import { logSuccess, logError } from "./logger.js";
 import "dotenv/config";
 
 const app = express();
 const COLLECTION_NAME = process.env.COLLECTION_NAME;
+
+const ENDPOINT_UPSERT = "POST /points/upsert";
+const ENDPOINT_MARK_VECTORIZED = "POST /company-profiles/mark-vectorized";
 
 /** POST /points/upsert usa body grande (lista de pontos); parser próprio antes do global. */
 app.post(
@@ -25,6 +29,7 @@ app.post(
     if (normalized.points.length === 0) {
       return res.status(400).json({ error: "Nenhum ponto para inserir" });
     }
+    const start = Date.now();
     try {
       const size = batchSize != null ? Math.max(1, Math.min(500, Number(batchSize))) : undefined;
       const result = await upsertPointsBatch({
@@ -33,15 +38,27 @@ app.post(
         batchSize: size,
         wait: true,
       });
+      logSuccess(ENDPOINT_UPSERT, "Inserção no Qdrant concluída", {
+        collection: COLLECTION_NAME,
+        upserted: result.upserted,
+        batches: result.batches,
+        duration_ms: Date.now() - start,
+      });
       res.setHeader("Content-Type", "application/json; charset=utf-8");
       return res.json({ ok: true, ...result });
     } catch (err) {
-      console.error("Erro no upsert em batch:", err);
       const status = err.status ?? err.statusCode ?? 500;
-      const message =
-        status === 400 && err.data?.status?.error
-          ? err.data.status.error
-          : "Erro ao inserir pontos no Qdrant";
+      const qdrantMsg = status === 400 && err.data?.status?.error ? err.data.status.error : null;
+      const message = qdrantMsg || (err.batchIndex != null
+        ? `Falha na inserção no Qdrant: lote ${err.batchIndex}/${err.totalBatches}. ${err.message || "Erro desconhecido"}`
+        : `Falha na inserção no Qdrant: ${err.message || "Erro desconhecido"}`);
+      logError(ENDPOINT_UPSERT, "Inserção no Qdrant falhou", err, {
+        collection: COLLECTION_NAME,
+        batch_index: err.batchIndex,
+        total_batches: err.totalBatches,
+        status,
+        qdrant_error: err.data?.status?.error,
+      });
       return res.status(status).json({ error: message });
     }
   }
@@ -63,8 +80,16 @@ app.post("/company-profiles/mark-vectorized", async (req, res) => {
       error: "Body deve ser um array de CNPJ ou um objeto { cnpjs: string[] }",
     });
   }
+  const start = Date.now();
   try {
     const result = await markAsVectorized(cnpjs);
+    logSuccess(ENDPOINT_MARK_VECTORIZED, "Atualização no banco concluída", {
+      cnpjs_recebidos: cnpjs.length,
+      updated: result.updated,
+      chunks: result.chunks,
+      concurrency: result.concurrency,
+      duration_ms: Date.now() - start,
+    });
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     return res.json({
       ok: true,
@@ -72,10 +97,21 @@ app.post("/company-profiles/mark-vectorized", async (req, res) => {
       ...result,
     });
   } catch (err) {
-    console.error("Erro ao marcar perfis como vetorizados:", err);
-    const status = err.code === "ECONNREFUSED" ? 503 : (err.status ?? err.statusCode ?? 500);
-    const message = err.message || "Erro ao atualizar banco de dados";
-    return res.status(status).json({ error: message });
+    const status = err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" ? 503
+      : err.code === "ETIMEDOUT" ? 504
+      : err.status ?? err.statusCode ?? 500;
+    const message = err.message || "Falha ao atualizar banco de dados (company_profile.qdrant)";
+    const detail = err.chunkIndex != null
+      ? ` Chunk ${err.chunkIndex}/${err.totalChunks} (${err.cnpjsInChunk} CNPJs).`
+      : "";
+    logError(ENDPOINT_MARK_VECTORIZED, "Atualização no banco falhou", err, {
+      cnpjs_count: cnpjs.length,
+      chunk_index: err.chunkIndex,
+      total_chunks: err.totalChunks,
+      pg_code: err.code,
+      status,
+    });
+    return res.status(status).json({ error: message + detail });
   }
 });
 
@@ -263,12 +299,16 @@ app.post("/search", async (req, res) => {
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     return res.json(typeof out === "object" && out.results && out.debug ? out : { results: out });
   } catch (err) {
-    console.error("Erro na busca vetorial:", err);
     const status = err.status ?? err.statusCode ?? 500;
     const message =
       status === 400 && err.data?.status?.error
         ? err.data.status.error
-        : "Erro no banco vetorial";
+        : "Erro no banco vetorial (busca Qdrant)";
+    logError("POST /search", "Busca vetorial falhou", err, {
+      collection: COLLECTION_NAME,
+      status,
+      qdrant_error: err.data?.status?.error,
+    });
     return res.status(status).json({ error: message });
   }
 });

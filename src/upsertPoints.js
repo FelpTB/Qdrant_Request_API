@@ -70,11 +70,19 @@ export async function upsertPointsBatch({
 
   for (let i = 0; i < points.length; i += size) {
     const batch = points.slice(i, i + size);
-    await qdrantClient.upsert(collectionName, {
-      wait,
-      points: batch,
-    });
-    upserted += batch.length;
+    const batchIndex = Math.floor(i / size) + 1;
+    try {
+      await qdrantClient.upsert(collectionName, {
+        wait,
+        points: batch,
+      });
+      upserted += batch.length;
+    } catch (err) {
+      err.batchIndex = batchIndex;
+      err.totalBatches = totalBatches;
+      err.collectionName = collectionName;
+      throw err;
+    }
   }
 
   return { upserted, batches: totalBatches };
