@@ -234,16 +234,35 @@ Marca perfis como vetorizados no PostgreSQL: atualiza `busca_fornecedor.company_
 
 **Otimização:** a lista é processada em chunks (padrão 1000 CNPJs por UPDATE) com até 8 workers em paralelo, sem estourar o pool de conexões. Só linhas com `qdrant` false ou null são atualizadas.
 
+### Pipeline de vetorização end-to-end
+
+A API pode executar o fluxo completo **Busca empresas (Supabase) → Embeddings (OpenAI) → Upsert (Qdrant) → Mark vectorized (Supabase)** em background, com métricas em tempo real.
+
+**Requisitos:** `DB_URL`, `COLLECTION_NAME`, `OPENAI_API_KEY`, além das variáveis do Qdrant.
+
+- **POST `/pipeline/run`** — Inicia o pipeline. Body: `{ "limit": number }` (ex.: 5000). Resposta **202** com `dashboard_url`, `status_url`, `stream_url`. Se já estiver rodando, retorna **409**.
+- **GET `/pipeline/status`** — Retorna o estado atual (JSON): status, tempos por etapa, totais e taxas de sucesso.
+- **GET `/pipeline/stream`** — Server-Sent Events: envia o estado a cada ~1,5 s enquanto o pipeline está em execução; encerra ao completar ou falhar.
+- **GET `/pipeline/dashboard`** — Página HTML que conecta ao stream e exibe tempo de processo e taxa de sucesso de cada etapa; inclui formulário para iniciar o pipeline com um limite.
+
+Variáveis opcionais: `OPENAI_EMBED_BATCH_SIZE` (padrão 100), `PIPELINE_CHUNK_SIZE` (empresas por rodada, padrão 200), `UPSERT_BATCH_SIZE` (padrão 100).
+
 ## Estrutura do projeto
 
 ```
 src/
-  server.js          # Express, POST /search, /points/upsert, /company-profiles/mark-vectorized
-  qdrantClient.js    # Cliente Qdrant (Cloud)
+  server.js            # Express, /search, /points/upsert, /company-profiles/mark-vectorized, /pipeline/*
+  qdrantClient.js     # Cliente Qdrant (Cloud)
   multiVectorSearch.js # Busca por vetores nomeados e fusão (RRF/BM25)
-  upsertPoints.js    # Normalização e upsert em batch no Qdrant
-  db.js              # Pool PostgreSQL (DB_URL)
-  markVectorized.js  # Atualização em batch de qdrant=true por CNPJ
+  upsertPoints.js     # Normalização e upsert em batch no Qdrant
+  db.js               # Pool PostgreSQL (DB_URL)
+  markVectorized.js   # Atualização em batch de qdrant=true por CNPJ
+  fetchCompanyProfiles.js # SELECT company_profile WHERE qdrant = false (pipeline)
+  transformProfile.js # full_profile → vetores + payload (espelho n8n)
+  embeddings.js       # OpenAI text-embedding-3-small em batch
+  pipeline.js         # Orquestração fetch → transform → embed → upsert → mark
+  dashboardHtml.js    # HTML do dashboard de métricas (SSE)
+  logger.js           # Log estruturado
 .env
 package.json
 ```

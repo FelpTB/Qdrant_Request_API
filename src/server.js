@@ -4,6 +4,8 @@ import { normalizePointsInput, upsertPointsBatch } from "./upsertPoints.js";
 import { markAsVectorized } from "./markVectorized.js";
 import { isDbConfigured } from "./db.js";
 import { logSuccess, logError } from "./logger.js";
+import { getPipelineState, runPipeline } from "./pipeline.js";
+import { getDashboardHtml } from "./dashboardHtml.js";
 import "dotenv/config";
 
 const app = express();
@@ -335,6 +337,64 @@ app.get("/config", (_req, res) => {
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+/** Pipeline: inicia processamento em background. Body: { limit: number }. */
+app.post("/pipeline/run", (req, res) => {
+  const state = getPipelineState();
+  if (state.status === "running") {
+    return res.status(409).json({ error: "Pipeline já está em execução" });
+  }
+  const limit = req.body && req.body.limit != null ? Number(req.body.limit) : NaN;
+  if (!Number.isInteger(limit) || limit < 1) {
+    return res.status(400).json({ error: "Body deve conter 'limit' (inteiro >= 1)" });
+  }
+  Promise.resolve().then(() => runPipeline(limit)).catch((err) => {
+    console.error("Pipeline error:", err);
+  });
+  res.status(202).json({
+    ok: true,
+    message: "Pipeline iniciado",
+    limit,
+    dashboard_url: "/pipeline/dashboard",
+    status_url: "/pipeline/status",
+    stream_url: "/pipeline/stream",
+  });
+});
+
+/** Pipeline: estado atual (JSON). */
+app.get("/pipeline/status", (_req, res) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.json(getPipelineState());
+});
+
+/** Pipeline: SSE com estado a cada ~1.5s enquanto running; encerra ao completar ou falhar. */
+app.get("/pipeline/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const interval = setInterval(() => {
+    const state = getPipelineState();
+    send(state);
+    if (state.status !== "running") {
+      clearInterval(interval);
+      res.end();
+    }
+  }, 1500);
+
+  req.on("close", () => clearInterval(interval));
+});
+
+/** Pipeline: dashboard HTML (página que consome SSE e exibe métricas). */
+app.get("/pipeline/dashboard", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(getDashboardHtml());
 });
 
 const PORT = Number(process.env.PORT) || 3000;
