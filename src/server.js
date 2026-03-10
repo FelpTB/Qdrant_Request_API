@@ -187,8 +187,10 @@ function isValidVector(arr) {
 }
 
 /**
- * Converte filtro simples { chave: valor } em formato Qdrant (must + match).
+ * Converte filtro simples { chave: valor | valor[] } em formato Qdrant (must + match).
  * Apenas chaves presentes em allowedKeys são aceitas.
+ * - valor escalar (string/number) → match: { value }
+ * - array de valores → match: { any: [...] } (ex.: uf: ["SP", "MG", "RJ"])
  */
 function buildQdrantFilter(payloadFilter, allowedKeys) {
   if (!payloadFilter || typeof payloadFilter !== "object" || allowedKeys.length === 0)
@@ -197,7 +199,12 @@ function buildQdrantFilter(payloadFilter, allowedKeys) {
   for (const [key, value] of Object.entries(payloadFilter)) {
     if (!allowedKeys.includes(key)) continue;
     if (value === undefined || value === null) continue;
-    must.push({ key, match: { value } });
+    if (Array.isArray(value)) {
+      const any = value.filter((v) => v !== undefined && v !== null && (typeof v === "string" || typeof v === "number" || typeof v === "boolean"));
+      if (any.length > 0) must.push({ key, match: { any } });
+    } else {
+      must.push({ key, match: { value } });
+    }
   }
   return must.length > 0 ? { must } : null;
 }
