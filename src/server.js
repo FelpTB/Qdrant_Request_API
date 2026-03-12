@@ -195,6 +195,7 @@ function isValidVector(arr) {
  * - valor escalar → match: { value } (campo = valor).
  * - array de valores → should: [ match value, ... ] (campo = QUALQUER UM da lista, OR).
  *   Ex.: uf: ["RJ", "SP", "MG"] → empresas cuja uf é RJ OU SP OU MG.
+ * - string com vírgulas é convertida em array: uf: "SP,RJ" → ["SP", "RJ"] (OR).
  * - Várias chaves no filter → must: [ cond1, cond2 ] (AND entre chaves).
  *
  * Usamos "should" + vários "match value" em vez de "match.any" para máxima compatibilidade com o Qdrant.
@@ -205,15 +206,29 @@ function isFilterValueEmpty(v) {
   return false;
 }
 
+/** Normaliza valor do filtro: string "SP,RJ" vira array ["SP", "RJ"] para tratar como OR. */
+function normalizeFilterValue(value) {
+  if (value === undefined || value === null) return value;
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string" && value.includes(",")) {
+    const arr = value.split(",").map((s) => s.trim()).filter((s) => s !== "");
+    return arr.length === 0 ? null : arr.length === 1 ? arr[0] : arr;
+  }
+  return value;
+}
+
 function buildQdrantFilter(payloadFilter, allowedKeys) {
   if (!payloadFilter || typeof payloadFilter !== "object" || allowedKeys.length === 0)
     return null;
   const must = [];
   for (const [key, value] of Object.entries(payloadFilter)) {
     if (!allowedKeys.includes(key)) continue;
-    if (value === undefined || value === null) continue;
-    if (Array.isArray(value)) {
-      const values = value.filter(
+    const raw = value;
+    if (raw === undefined || raw === null) continue;
+    const valueNorm = normalizeFilterValue(raw);
+    if (valueNorm === undefined || valueNorm === null) continue;
+    if (Array.isArray(valueNorm)) {
+      const values = valueNorm.filter(
         (v) =>
           !isFilterValueEmpty(v) &&
           (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
@@ -228,8 +243,8 @@ function buildQdrantFilter(payloadFilter, allowedKeys) {
         });
       }
     } else {
-      if (isFilterValueEmpty(value)) continue;
-      must.push({ key, match: { value } });
+      if (isFilterValueEmpty(valueNorm)) continue;
+      must.push({ key, match: { value: valueNorm } });
     }
   }
   return must.length > 0 ? { must } : null;
