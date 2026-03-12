@@ -6,6 +6,7 @@ import { isDbConfigured } from "./db.js";
 import { logSuccess, logError } from "./logger.js";
 import { getPipelineState, runPipeline } from "./pipeline.js";
 import { getDashboardHtml } from "./dashboardHtml.js";
+import { normalizeKeyword } from "./normalizeKeyword.js";
 import "dotenv/config";
 
 const app = express();
@@ -234,17 +235,19 @@ function buildQdrantFilter(payloadFilter, allowedKeys) {
           (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
       );
       if (values.length === 0) continue;
+      const toMatchValue = (v) => (typeof v === "string" ? normalizeKeyword(v) : v);
       if (values.length === 1) {
-        must.push({ key, match: { value: values[0] } });
+        must.push({ key, match: { value: toMatchValue(values[0]) } });
       } else {
         // OR explícito: should com um match.value por valor (evita bugs com match.any)
         must.push({
-          should: values.map((v) => ({ key, match: { value: v } })),
+          should: values.map((v) => ({ key, match: { value: toMatchValue(v) } })),
         });
       }
     } else {
       if (isFilterValueEmpty(valueNorm)) continue;
-      must.push({ key, match: { value: valueNorm } });
+      const matchVal = typeof valueNorm === "string" ? normalizeKeyword(valueNorm) : valueNorm;
+      must.push({ key, match: { value: matchVal } });
     }
   }
   return must.length > 0 ? { must } : null;

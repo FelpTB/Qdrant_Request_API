@@ -1,3 +1,5 @@
+import { normalizeKeyword } from "./normalizeKeyword.js";
+
 /**
  * Normaliza valor para string (espelho do Code n8n).
  * @param {unknown} value
@@ -76,10 +78,10 @@ export function transformRow(row) {
   const cobertura = clean(classificacao.cobertura_geografica);
 
   const payload = {
-    modelo_negocio: modeloNegocio,
+    modelo_negocio: normalizeKeyword(modeloNegocio),
     nome_empresa: nomeEmpresa,
     cnpj: clean(identidade.cnpj) || row.cnpj,
-    cidade: municipio,
+    cidade: normalizeKeyword(municipio),
     telefone: telefones,
     site,
     endereco,
@@ -89,7 +91,7 @@ export function transformRow(row) {
     descricao,
     publico,
     cliente: clientes,
-    uf,
+    uf: normalizeKeyword(uf),
     certificacoes,
     premios,
     parcerias,
