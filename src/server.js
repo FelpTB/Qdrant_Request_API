@@ -1,5 +1,6 @@
 import express from "express";
 import { multiVectorSearch } from "./multiVectorSearch.js";
+import qdrantClient from "./qdrantClient.js";
 import { normalizePointsInput, upsertPointsBatch } from "./upsertPoints.js";
 import { markAsVectorized } from "./markVectorized.js";
 import { isDbConfigured } from "./db.js";
@@ -370,6 +371,67 @@ app.post("/search", async (req, res) => {
       status,
       qdrant_error: err.data?.status?.error,
     });
+    return res.status(status).json({ error: message });
+  }
+});
+
+/** Diagnóstico: testa o filtro no Qdrant sem busca vetorial. Retorna quantos pontos batem e amostra de payloads. */
+app.post("/search/validate-filter", express.json(), async (req, res) => {
+  if (!COLLECTION_NAME) {
+    return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
+  }
+  const allowedPayloadKeys = getAllowedPayloadKeys();
+  if (allowedPayloadKeys.length === 0) {
+    return res.status(400).json({
+      error: "Configure QDRANT_PAYLOAD_KEYS no ambiente para usar filtros",
+    });
+  }
+  const filter = req.body?.filter;
+  if (filter != null && (typeof filter !== "object" || Array.isArray(filter))) {
+    return res.status(400).json({ error: "Campo 'filter' deve ser um objeto" });
+  }
+  const invalidKeys = filter
+    ? Object.keys(filter).filter((k) => !allowedPayloadKeys.includes(k))
+    : [];
+  if (invalidKeys.length > 0) {
+    return res.status(400).json({
+      error: `Chaves de filtro não permitidas: ${invalidKeys.join(", ")}. Permitidas: ${allowedPayloadKeys.join(", ")}`,
+    });
+  }
+  const qdrantFilter = buildQdrantFilter(filter || {}, allowedPayloadKeys);
+  const limit = Math.min(500, Math.max(10, Number(req.body?.limit) || 100));
+  try {
+    const result = await qdrantClient.scroll(COLLECTION_NAME, {
+      filter: qdrantFilter,
+      limit,
+      with_payload: true,
+      with_vector: false,
+    });
+    const list = Array.isArray(result?.points)
+      ? result.points
+      : Array.isArray(result)
+        ? (result[0] ?? [])
+        : [];
+    const sample_payloads = list.slice(0, 5).map((p) => ({
+      id: p.id,
+      payload: p.payload ?? {},
+    }));
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.json({
+      match_count: list.length,
+      filter_sent: qdrantFilter,
+      sample_payloads,
+      hint: list.length === 0
+        ? "Nenhum ponto bateu no filtro. Verifique se os valores do payload (cidade, modelo_negocio, etc.) coincidem com o filtro e se os dados foram indexados com o pipeline atual."
+        : undefined,
+    });
+  } catch (err) {
+    const status = err.status ?? err.statusCode ?? 500;
+    const message =
+      status === 400 && err.data?.status?.error
+        ? err.data.status.error
+        : "Erro ao validar filtro no Qdrant";
+    logError("POST /search/validate-filter", "Validação de filtro falhou", err);
     return res.status(status).json({ error: message });
   }
 });
