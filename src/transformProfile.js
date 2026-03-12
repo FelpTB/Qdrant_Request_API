@@ -78,7 +78,7 @@ export function transformRow(row) {
   const cobertura = clean(classificacao.cobertura_geografica);
 
   const payload = {
-    modelo_negocio: normalizeKeyword(modeloNegocio),
+    modelo_negocio: modeloNegocio,
     nome_empresa: nomeEmpresa,
     cnpj: clean(identidade.cnpj) || row.cnpj,
     cidade: normalizeKeyword(municipio),

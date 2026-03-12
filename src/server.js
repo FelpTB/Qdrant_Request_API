@@ -218,6 +218,9 @@ function normalizeFilterValue(value) {
   return value;
 }
 
+/** Chaves de payload cujos valores são normalizados (maiúsculas, sem acentos) no filtro. modelo_negocio fica como recebido. */
+const FILTER_KEYS_NORMALIZE = ["cidade", "uf"];
+
 function buildQdrantFilter(payloadFilter, allowedKeys) {
   if (!payloadFilter || typeof payloadFilter !== "object" || allowedKeys.length === 0)
     return null;
@@ -228,6 +231,8 @@ function buildQdrantFilter(payloadFilter, allowedKeys) {
     if (raw === undefined || raw === null) continue;
     const valueNorm = normalizeFilterValue(raw);
     if (valueNorm === undefined || valueNorm === null) continue;
+    const normalize = (v) =>
+      typeof v === "string" && FILTER_KEYS_NORMALIZE.includes(key) ? normalizeKeyword(v) : v;
     if (Array.isArray(valueNorm)) {
       const values = valueNorm.filter(
         (v) =>
@@ -235,19 +240,17 @@ function buildQdrantFilter(payloadFilter, allowedKeys) {
           (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
       );
       if (values.length === 0) continue;
-      const toMatchValue = (v) => (typeof v === "string" ? normalizeKeyword(v) : v);
       if (values.length === 1) {
-        must.push({ key, match: { value: toMatchValue(values[0]) } });
+        must.push({ key, match: { value: normalize(values[0]) } });
       } else {
         // OR explícito: should com um match.value por valor (evita bugs com match.any)
         must.push({
-          should: values.map((v) => ({ key, match: { value: toMatchValue(v) } })),
+          should: values.map((v) => ({ key, match: { value: normalize(v) } })),
         });
       }
     } else {
       if (isFilterValueEmpty(valueNorm)) continue;
-      const matchVal = typeof valueNorm === "string" ? normalizeKeyword(valueNorm) : valueNorm;
-      must.push({ key, match: { value: matchVal } });
+      must.push({ key, match: { value: normalize(valueNorm) } });
     }
   }
   return must.length > 0 ? { must } : null;
