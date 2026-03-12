@@ -187,11 +187,17 @@ function isValidVector(arr) {
 }
 
 /**
- * Converte filtro simples { chave: valor | valor[] } em formato Qdrant (must + match).
+ * Converte filtro simples { chave: valor | valor[] } em formato Qdrant.
  * Apenas chaves presentes em allowedKeys são aceitas.
- * Valores vazios ou só espaços (" ") são ignorados (não entram no filtro).
- * - valor escalar (string/number) → match: { value }
- * - array de valores → match: { any: [...] } (ex.: uf: ["SP", "MG", "RJ"])
+ * Valores vazios ou só espaços (" ") são ignorados.
+ *
+ * Semântica:
+ * - valor escalar → match: { value } (campo = valor).
+ * - array de valores → should: [ match value, ... ] (campo = QUALQUER UM da lista, OR).
+ *   Ex.: uf: ["RJ", "SP", "MG"] → empresas cuja uf é RJ OU SP OU MG.
+ * - Várias chaves no filter → must: [ cond1, cond2 ] (AND entre chaves).
+ *
+ * Usamos "should" + vários "match value" em vez de "match.any" para máxima compatibilidade com o Qdrant.
  */
 function isFilterValueEmpty(v) {
   if (v === undefined || v === null) return true;
@@ -207,12 +213,20 @@ function buildQdrantFilter(payloadFilter, allowedKeys) {
     if (!allowedKeys.includes(key)) continue;
     if (value === undefined || value === null) continue;
     if (Array.isArray(value)) {
-      const any = value.filter(
+      const values = value.filter(
         (v) =>
           !isFilterValueEmpty(v) &&
           (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
       );
-      if (any.length > 0) must.push({ key, match: { any } });
+      if (values.length === 0) continue;
+      if (values.length === 1) {
+        must.push({ key, match: { value: values[0] } });
+      } else {
+        // OR explícito: should com um match.value por valor (evita bugs com match.any)
+        must.push({
+          should: values.map((v) => ({ key, match: { value: v } })),
+        });
+      }
     } else {
       if (isFilterValueEmpty(value)) continue;
       must.push({ key, match: { value } });
@@ -319,6 +333,10 @@ app.post("/search", async (req, res) => {
     });
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
+    if (debugMode && typeof out === "object" && out.results && out.debug) {
+      out.debug.filter_sent = qdrantFilter;
+      return res.json(out);
+    }
     return res.json(typeof out === "object" && out.results && out.debug ? out : { results: out });
   } catch (err) {
     const status = err.status ?? err.statusCode ?? 500;
