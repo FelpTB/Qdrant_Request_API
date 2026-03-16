@@ -177,14 +177,27 @@ export async function multiVectorSearch({
     return { ...item, scores, score_final };
   });
 
-  combined.sort((a, b) => b.score_final - a.score_final);
-  const resultsSlice = combined.slice(0, finalLimit);
+  // Remove do resultado final empresas com score 0 em servico E produto
+  const servicoKey = dimensionKeys.includes("servico") ? "servico" : null;
+  const produtoKey = dimensionKeys.includes("produto") ? "produto" : null;
+  const filtered =
+    servicoKey && produtoKey
+      ? combined.filter((item) => {
+          const s = item.scores[servicoKey] ?? 0;
+          const p = item.scores[produtoKey] ?? 0;
+          return !(s === 0 && p === 0);
+        })
+      : combined;
+
+  filtered.sort((a, b) => b.score_final - a.score_final);
+  const resultsSlice = filtered.slice(0, finalLimit);
   if (returnDebugCounts) {
     return {
       results: resultsSlice,
       debug: {
         points_per_dimension: pointsPerDimension,
         total_after_merge: combined.length,
+        filtered_zero_servico_produto: combined.length - filtered.length,
         returned: resultsSlice.length,
       },
     };

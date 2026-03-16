@@ -222,6 +222,11 @@ function normalizeFilterValue(value) {
 /** Chaves de payload cujos valores são normalizados (maiúsculas, sem acentos) no filtro. modelo_negocio fica como recebido. */
 const FILTER_KEYS_NORMALIZE = ["cidade", "uf"];
 
+/**
+ * Constrói o filtro Qdrant.
+ * - Valores únicos ou lista com 1 item → must com match.value.
+ * - Lista com vários itens → must com match.any (um único array), evitando centenas de condições em should.
+ */
 function buildQdrantFilter(payloadFilter, allowedKeys) {
   if (!payloadFilter || typeof payloadFilter !== "object" || allowedKeys.length === 0)
     return null;
@@ -241,13 +246,11 @@ function buildQdrantFilter(payloadFilter, allowedKeys) {
           (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
       );
       if (values.length === 0) continue;
-      if (values.length === 1) {
-        must.push({ key, match: { value: normalize(values[0]) } });
+      const normalized = values.map((v) => normalize(v));
+      if (normalized.length === 1) {
+        must.push({ key, match: { value: normalized[0] } });
       } else {
-        // OR explícito: should com um match.value por valor (evita bugs com match.any)
-        must.push({
-          should: values.map((v) => ({ key, match: { value: normalize(v) } })),
-        });
+        must.push({ key, match: { any: normalized } });
       }
     } else {
       if (isFilterValueEmpty(valueNorm)) continue;
@@ -421,9 +424,10 @@ app.post("/search/validate-filter", express.json(), async (req, res) => {
       match_count: list.length,
       filter_sent: qdrantFilter,
       sample_payloads,
-      hint: list.length === 0
-        ? "Nenhum ponto bateu no filtro. Verifique se os valores do payload (cidade, modelo_negocio, etc.) coincidem com o filtro e se os dados foram indexados com o pipeline atual."
-        : undefined,
+      hint:
+        list.length === 0
+          ? "Nenhum ponto bateu no filtro. Cidade/UF no payload devem estar em MAIÚSCULAS e sem acentos (ex: SAO LOURENCO). Envie body {} para ver amostra de payloads da coleção. Reindexe com o pipeline atual se os dados foram inseridos antes da normalização."
+          : undefined,
     });
   } catch (err) {
     const status = err.status ?? err.statusCode ?? 500;
