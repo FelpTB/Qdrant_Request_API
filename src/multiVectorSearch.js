@@ -123,6 +123,7 @@ export async function multiVectorSearch({
     }
   }
 
+  let bm25OptsForDebug = null;
   if (useBm25) {
     const multiplier = getBm25CandidatesMultiplier();
     const bm25Limit = Math.max(limitPerVector * multiplier, finalLimit * multiplier);
@@ -135,6 +136,7 @@ export async function multiVectorSearch({
       with_vector: false,
       ...(filter && { filter }),
     };
+    bm25OptsForDebug = bm25Opts;
     const bm25Response = await qdrantClient.query(collection, bm25Opts);
     const bm25Points = Array.isArray(bm25Response)
       ? bm25Response
@@ -192,14 +194,17 @@ export async function multiVectorSearch({
   filtered.sort((a, b) => b.score_final - a.score_final);
   const resultsSlice = filtered.slice(0, finalLimit);
   if (returnDebugCounts) {
+    const debugOut = {
+      points_per_dimension: pointsPerDimension,
+      total_after_merge: combined.length,
+      filtered_zero_servico_produto: combined.length - filtered.length,
+      returned: resultsSlice.length,
+      qdrant_search_opts_example: searchOpts,
+      qdrant_bm25_opts: bm25OptsForDebug,
+    };
     return {
       results: resultsSlice,
-      debug: {
-        points_per_dimension: pointsPerDimension,
-        total_after_merge: combined.length,
-        filtered_zero_servico_produto: combined.length - filtered.length,
-        returned: resultsSlice.length,
-      },
+      debug: debugOut,
     };
   }
   return resultsSlice;
