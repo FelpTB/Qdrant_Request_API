@@ -49,6 +49,7 @@ function getRrfK() {
  * @param {number} params.finalLimit - quantidade final no ranking
  * @param {string} params.collectionName - nome da coleção
  * @param {object|null} params.filter - filtro Qdrant (must/match), aplicado antes da busca semântica
+ * @param {Array<(payload: object) => boolean>} [params.filterNotPredicates] - predicados de exclusão (pós-processamento quando Qdrant não aplica must_not)
  * @param {string|null} [params.bm25Query] - texto para busca BM25
  * @param {boolean} [params.returnDebugCounts=false] - se true, retorna { results, debug: { points_per_dimension, bm25_points } }
  * @returns {Promise<Array<...>|{ results: Array<...>, debug: object }>}
@@ -61,6 +62,7 @@ export async function multiVectorSearch({
   finalLimit,
   collectionName,
   filter = null,
+  filterNotPredicates = [],
   bm25Query = null,
   returnDebugCounts = false,
 }) {
@@ -182,7 +184,7 @@ export async function multiVectorSearch({
   // Remove do resultado final empresas com score 0 em servico E produto
   const servicoKey = dimensionKeys.includes("servico") ? "servico" : null;
   const produtoKey = dimensionKeys.includes("produto") ? "produto" : null;
-  const filtered =
+  let filtered =
     servicoKey && produtoKey
       ? combined.filter((item) => {
           const s = item.scores[servicoKey] ?? 0;
@@ -191,13 +193,20 @@ export async function multiVectorSearch({
         })
       : combined;
 
+  const beforeFilterNot = filtered.length;
+  if (Array.isArray(filterNotPredicates) && filterNotPredicates.length > 0) {
+    filtered = filtered.filter((item) => !filterNotPredicates.some((pred) => pred(item.payload ?? {})));
+  }
+  const filtered_by_filter_not = beforeFilterNot - filtered.length;
+
   filtered.sort((a, b) => b.score_final - a.score_final);
   const resultsSlice = filtered.slice(0, finalLimit);
   if (returnDebugCounts) {
     const debugOut = {
       points_per_dimension: pointsPerDimension,
       total_after_merge: combined.length,
-      filtered_zero_servico_produto: combined.length - filtered.length,
+      filtered_zero_servico_produto: combined.length - beforeFilterNot,
+      filtered_by_filter_not,
       returned: resultsSlice.length,
       qdrant_search_opts_example: searchOpts,
       qdrant_bm25_opts: bm25OptsForDebug,

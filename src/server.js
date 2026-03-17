@@ -353,6 +353,53 @@ function mergeQdrantFilter(positive, negative) {
   if (hasNegative) out.must_not = negative.must_not;
   return Object.keys(out).length > 0 ? out : null;
 }
+
+/**
+ * Predicados de exclusão para pós-processamento: o Qdrant pode não aplicar must_not com match.text.
+ * Retorna array de funções (payload) => true se o ponto deve ser excluído.
+ */
+function buildFilterNotPredicates(payloadFilterNot, keywordKeys, fullTextKeys = []) {
+  if (!payloadFilterNot || typeof payloadFilterNot !== "object") return [];
+  const predicates = [];
+  for (const [key, value] of Object.entries(payloadFilterNot)) {
+    const raw = value;
+    if (raw === undefined || raw === null || isFilterValueEmpty(raw)) continue;
+
+    if (fullTextKeys.includes(key)) {
+      const textQuery = Array.isArray(raw)
+        ? raw.filter((v) => !isFilterValueEmpty(v)).map(String).join(" ").trim()
+        : typeof raw === "string" ? raw.trim() : String(raw).trim();
+      if (!textQuery) continue;
+      const terms = textQuery.split(/\s+/).filter(Boolean).map((t) => t.toLowerCase());
+      predicates.push((payload) => {
+        const text = String(payload?.[key] ?? "").toLowerCase();
+        return terms.some((term) => text.includes(term));
+      });
+      continue;
+    }
+
+    if (!keywordKeys.includes(key)) continue;
+    const valueNorm = normalizeFilterValue(raw);
+    if (valueNorm === undefined || valueNorm === null) continue;
+    const normalize = (v) =>
+      typeof v === "string" && FILTER_KEYS_NORMALIZE.includes(key) ? normalizeKeyword(v) : (v != null ? String(v).trim() : "");
+    const values = Array.isArray(valueNorm)
+      ? valueNorm.filter(
+          (v) =>
+            !isFilterValueEmpty(v) &&
+            (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+        ).map(normalize)
+      : [normalize(valueNorm)];
+    if (values.length === 0) continue;
+    const valueSet = new Set(values);
+    predicates.push((payload) => {
+      const pv = payload?.[key];
+      const norm = normalize(pv);
+      return valueSet.has(norm);
+    });
+  }
+  return predicates;
+}
 function validateSearchBody(body) {
   if (!body || typeof body !== "object")
     return { status: 400, message: "Request body inválido" };
@@ -443,6 +490,7 @@ app.post("/search", async (req, res) => {
   const qdrantFilterPositive = buildQdrantFilter(filter, keywordKeys, fullTextKeys);
   const qdrantFilterNegative = buildQdrantFilterNot(filter_not, keywordKeys, fullTextKeys);
   const qdrantFilter = mergeQdrantFilter(qdrantFilterPositive, qdrantFilterNegative);
+  const filterNotPredicates = buildFilterNotPredicates(filter_not, keywordKeys, fullTextKeys);
 
   const vectorsForSearch = {};
   for (const dim of dimensionKeys) vectorsForSearch[dim] = vectors[dim];
@@ -457,6 +505,7 @@ app.post("/search", async (req, res) => {
       finalLimit: final_limit,
       collectionName: COLLECTION_NAME,
       filter: qdrantFilter,
+      filterNotPredicates,
       bm25Query: typeof bm25_query === "string" ? bm25_query : null,
       returnDebugCounts: debugMode,
     });
