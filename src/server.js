@@ -357,10 +357,14 @@ function mergeQdrantFilter(positive, negative) {
 /**
  * Predicados de exclusão para pós-processamento: o Qdrant pode não aplicar must_not com match.text.
  * Retorna array de funções (payload) => true se o ponto deve ser excluído.
+ * Full-text: termos são verificados em TODOS os campos full-text do payload (descricao, endereco, publico, etc.).
+ * Keyword: cada chave aplica apenas ao seu campo (match exato).
  */
 function buildFilterNotPredicates(payloadFilterNot, keywordKeys, fullTextKeys = []) {
   if (!payloadFilterNot || typeof payloadFilterNot !== "object") return [];
   const predicates = [];
+  const allFullTextTerms = new Set();
+
   for (const [key, value] of Object.entries(payloadFilterNot)) {
     const raw = value;
     if (raw === undefined || raw === null || isFilterValueEmpty(raw)) continue;
@@ -370,11 +374,7 @@ function buildFilterNotPredicates(payloadFilterNot, keywordKeys, fullTextKeys = 
         ? raw.filter((v) => !isFilterValueEmpty(v)).map(String).join(" ").trim()
         : typeof raw === "string" ? raw.trim() : String(raw).trim();
       if (!textQuery) continue;
-      const terms = textQuery.split(/\s+/).filter(Boolean).map((t) => t.toLowerCase());
-      predicates.push((payload) => {
-        const text = String(payload?.[key] ?? "").toLowerCase();
-        return terms.some((term) => text.includes(term));
-      });
+      textQuery.split(/\s+/).filter(Boolean).forEach((t) => allFullTextTerms.add(t.toLowerCase()));
       continue;
     }
 
@@ -398,6 +398,18 @@ function buildFilterNotPredicates(payloadFilterNot, keywordKeys, fullTextKeys = 
       return valueSet.has(norm);
     });
   }
+
+  if (allFullTextTerms.size > 0 && fullTextKeys.length > 0) {
+    const terms = [...allFullTextTerms];
+    predicates.push((payload) => {
+      for (const key of fullTextKeys) {
+        const text = String(payload?.[key] ?? "").toLowerCase();
+        if (terms.some((term) => text.includes(term))) return true;
+      }
+      return false;
+    });
+  }
+
   return predicates;
 }
 function validateSearchBody(body) {
