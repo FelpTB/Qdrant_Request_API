@@ -1,94 +1,266 @@
-# API de Busca Vetorial Multidimensional (MVP)
+# API de Busca Vetorial Multidimensional
 
-API que recebe N vetores de embedding (por padrão 3: segmento, produtos, clientes), consulta o Qdrant por named vectors e devolve empresas ordenadas por score ponderado. Suporta 3 ou 5 (ou mais) vetores via variáveis de ambiente.
+API que recebe N vetores de embedding, consulta o Qdrant por **named vectors** e devolve empresas ordenadas por score ponderado. Suporta:
+
+- **Múltiplos vetores densos** (ex.: produto, servico, descricao, publico, cliente) configuráveis via env
+- **Busca híbrida com BM25** (vetor esparso na coleção)
+- **Filtros keyword** (match exato / lista com OR): `uf`, `cidade`, `modelo_negocio`, `nome_empresa`, `cnpj`
+- **Filtros full-text** (busca lexical em texto): `descricao`, `endereco`, `publico`, `site`, `email`, `certificacoes`
+- **Filtro negativo** (`filter_not`) para desambiguação (ex.: excluir "combustível" na descrição)
+- **Pipeline** de vetorização: PostgreSQL → OpenAI embeddings → Qdrant → marcação de vetorizados
 
 ## Requisitos
 
-- Node.js >= 18
-- Coleção Qdrant com vetores nomeados (ex.: `v_segmento`, `v_produtos`, `v_clientes` ou 5 vetores com nomes configuráveis; mesma dimensão, ex.: 1536)
+- **Node.js** >= 18
+- **Coleção Qdrant** com vetores nomeados (ex.: `v_produto`, `v_servico`, `v_descricao`, `v_publico`, `v_cliente`), mesma dimensão (ex.: 1536), e opcionalmente vetor esparso BM25
 
 ## Configuração
 
-Copie `.env` e preencha:
+Copie `.env.example` para `.env` e preencha:
 
-- `QDRANT_KEY` — API key do Qdrant Cloud
-- `CLUSTER_ENDPOINT` — URL do cluster (ex.: `https://xxx.sa-east-1-0.aws.cloud.qdrant.io`)
-- `COLLECTION_NAME` — Nome da coleção existente
+| Variável | Obrigatório | Descrição |
+|----------|-------------|-----------|
+| `QDRANT_KEY` | Sim | API key do Qdrant Cloud |
+| `CLUSTER_ENDPOINT` | Sim | URL do cluster (ex.: `https://xxx.sa-east-1-0.aws.cloud.qdrant.io`) |
+| `COLLECTION_NAME` | Sim | Nome da coleção existente |
 
-Opcionais: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST` (local use `127.0.0.1` se quiser).
+### Vetores (dimensionalidade da busca)
 
-**PostgreSQL (marcação de vetorizados)** — para o endpoint POST `/company-profiles/mark-vectorized` funcionar, defina `DB_URL` com a connection string do banco (ex.: `postgres://user:pass@host:5432/dbname`). A API atualiza a coluna `qdrant` para `true` na tabela `busca_fornecedor.company_profile` para os CNPJs enviados. Opcionais: `DB_POOL_SIZE` (máx. conexões no pool, padrão 10), `MARK_VECTORIZED_CHUNK_SIZE` (CNPJs por lote, padrão 1000), `MARK_VECTORIZED_CONCURRENCY` (até 8 workers em paralelo).
+- **QDRANT_DIMENSION_KEYS** — Chaves usadas no body da API em `vectors` e `weights`. Padrão: `segmento,produtos,clientes`. Para 5 vetores (esquema atual): `produto,servico,descricao,publico,cliente`.
+- **QDRANT_VECTOR_NAMES** — Nomes exatos dos vetores na coleção, **na mesma ordem** que `QDRANT_DIMENSION_KEYS`. Ex.: `v_produto,v_servico,v_descricao,v_publico,v_cliente`.
 
-**Filtros de payload** — para aceitar o campo `filter` no POST `/search`, defina `QDRANT_PAYLOAD_KEYS` com as chaves permitidas (as mesmas do payload no banco), ex.:  
-`QDRANT_PAYLOAD_KEYS=nome_empresa,cnpj,industria,modelo_negocio,publico_alvo,cobertura_geografica`  
-O filtro é aplicado **antes** da busca semântica no Qdrant (apenas pontos que atendem às condições entram na busca).
+Exemplo para a coleção com 5 vetores densos + BM25:
 
-**Se aparecer erro "Not existing vector name error"** — defina `QDRANT_VECTOR_NAMES` com os nomes exatos dos vetores na coleção, na mesma ordem das dimensões. Para **3 vetores** (padrão):  
-`QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes`  
-Para **5 vetores**, defina também `QDRANT_DIMENSION_KEYS` com as chaves da API na mesma ordem:  
-`QDRANT_DIMENSION_KEYS=capacidades,produtos,clientes,descricao,servico`  
-`QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes,v_descricao,v_servico`  
-O body do POST `/search` deve ter `vectors` e `weights` com exatamente essas chaves. Use **GET `/config`** para listar `dimension_keys` e `vector_names` configurados.
+```env
+QDRANT_DIMENSION_KEYS=produto,servico,descricao,publico,cliente
+QDRANT_VECTOR_NAMES=v_produto,v_servico,v_descricao,v_publico,v_cliente
+```
 
-**Busca híbrida com BM25** — para usar busca lexical (palavras-chave) nos campos `produtos`, `servicos` e `descricao`, a coleção precisa de um vetor esparso BM25. Defina `QDRANT_BM25_VECTOR_NAME` com o nome desse vetor (ex.: `bm25_texto`). No body do POST `/search` use `bm25_query` (string) e inclua **`bm25`** em **`weights`** — a soma de **weights (densos + bm25) deve ser 1.0**. O score BM25 é convertido com **RRF** (Reciprocal Rank Fusion, `1/(k+rank)`) antes da fusão. Candidatos BM25 usam multiplicador 5 por padrão (`BM25_CANDIDATES_MULTIPLIER`); opcional `RRF_K` (default 60). Opcionalmente defina `QDRANT_BM25_PAYLOAD_KEYS` com as chaves de payload que alimentam o vetor BM25 (ex.: `descricao,segmento,categoria`); isso é exposto em **GET `/config`** para quem consome a API.
+### Filtros de payload
+
+- **QDRANT_PAYLOAD_KEYS** — Chaves de filtro **keyword** (match exato / lista OR). Se não definir, a API usa: `modelo_negocio,cidade,uf,nome_empresa,cnpj`. Valores em `cidade` e `uf` são normalizados (maiúsculas, sem acentos).
+- **QDRANT_PAYLOAD_KEYS_TEXT** — Chaves de filtro **full-text** (busca lexical no Qdrant). Se não definir, a API usa: `descricao,endereco,publico,site,email,certificacoes`. Devem ser campos com índice text na coleção.
+
+```env
+# Opcional; padrões já cobrem o esquema atual
+# QDRANT_PAYLOAD_KEYS=modelo_negocio,cidade,uf,nome_empresa,cnpj
+# QDRANT_PAYLOAD_KEYS_TEXT=descricao,endereco,publico,site,email,certificacoes
+```
+
+### Busca BM25 (híbrida)
+
+- **QDRANT_BM25_VECTOR_NAME** — Nome do vetor esparso BM25 na coleção (ex.: `bm25_complete_profile`). Se definido, o body do POST `/search` pode incluir `bm25_query` e a chave `bm25` em `weights` (soma total = 1.0).
+- **QDRANT_BM25_PAYLOAD_KEYS** — (Opcional) Chaves de payload que alimentam o BM25; informativo em GET `/config`.
+- **BM25_CANDIDATES_MULTIPLIER** — (Opcional, default 5) Multiplicador de candidatos BM25.
+- **RRF_K** — (Opcional, default 60) Parâmetro RRF na fusão de rankings.
+
+### PostgreSQL (marcação de vetorizados e pipeline)
+
+- **DB_URL** — Connection string (ex.: `postgres://user:pass@host:5432/dbname`). Necessário para POST `/company-profiles/mark-vectorized` e para o pipeline de vetorização.
+- **OPENAI_API_KEY** — Obrigatório para o pipeline (embeddings).
+- Opcionais: `DB_POOL_SIZE`, `MARK_VECTORIZED_CHUNK_SIZE`, `MARK_VECTORIZED_CONCURRENCY`, `OPENAI_EMBED_BATCH_SIZE`, `PIPELINE_CHUNK_SIZE`, `UPSERT_BATCH_SIZE`, `QDRANT_UPSERT_WAIT`, `QDRANT_UPSERT_CONCURRENCY`, `QDRANT_UPSERT_MAX_BATCH`.
+
+Outras: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST`.
 
 ---
 
 ## Deploy no Railway
 
-1. Crie um projeto no [Railway](https://railway.app) e conecte este repositório (ou faça deploy via CLI).
-2. O Railway detecta Node.js e usa `npm start` automaticamente. Não é necessário `Procfile`.
-3. **Variáveis de ambiente (obrigatório)** — o container **só inicia** se estiverem definidas. No Railway: projeto → seu serviço → **Variables** → **Add Variable** (ou **Raw Editor** para colar várias):
-   - `QDRANT_KEY` — API key do Qdrant Cloud
-   - `CLUSTER_ENDPOINT` — URL do cluster (ex.: `https://xxx.sa-east-1-0.aws.cloud.qdrant.io`)
-   - `COLLECTION_NAME` — nome da coleção
-   - (Opcional) `QDRANT_PAYLOAD_KEYS` — chaves de payload permitidas para filtro (ex.: `nome_empresa,industria,modelo_negocio`)
-   - (Opcional) `QDRANT_BM25_VECTOR_NAME` — nome do vetor esparso BM25 na coleção (para busca por texto)
-   - (Opcional) `DB_URL` — connection string PostgreSQL para POST `/company-profiles/mark-vectorized`
-   - (Opcional) **5 vetores:** `QDRANT_DIMENSION_KEYS=capacidades,produtos,clientes,descricao,servico` e `QDRANT_VECTOR_NAMES=v_capacidades,v_produtos,v_clientes,v_descricao,v_servico` (mesma ordem)
-   - (Opcional) `SEARCH_TIMEOUT_SECONDS`
-   - O Railway define `PORT` automaticamente; não é preciso configurá-lo.
-4. Após o deploy, a URL pública será algo como `https://qdrant-busca-api-production-xxxx.up.railway.app`. Use-a no n8n.
+1. Crie um projeto no [Railway](https://railway.app) e conecte este repositório.
+2. O Railway detecta Node.js e usa `npm start`. Não é necessário Procfile.
+3. Em **Variables** do serviço, defina no mínimo: `QDRANT_KEY`, `CLUSTER_ENDPOINT`, `COLLECTION_NAME`.
+4. Opcionalmente: `QDRANT_PAYLOAD_KEYS`, `QDRANT_PAYLOAD_KEYS_TEXT`, `QDRANT_DIMENSION_KEYS`, `QDRANT_VECTOR_NAMES`, `QDRANT_BM25_VECTOR_NAME`, `DB_URL`, `OPENAI_API_KEY` (para pipeline), etc.
+5. A URL pública será algo como `https://seu-projeto.up.railway.app`. Use-a nas chamadas (n8n, front, etc.).
 
-A API escuta em `0.0.0.0` e na porta definida pelo Railway para funcionar corretamente no ambiente deles.
+A API escuta em `0.0.0.0` na porta definida pelo Railway.
+
+---
+
+## Uso
+
+### GET `/config`
+
+Retorna as chaves de vetores, payload e BM25 configuradas (sem chamar o Qdrant). Use para montar o body do POST `/search` corretamente.
+
+**Resposta (200):**
+
+```json
+{
+  "dimension_keys": ["produto", "servico", "descricao", "publico", "cliente"],
+  "payload_keys": ["modelo_negocio", "cidade", "uf", "nome_empresa", "cnpj"],
+  "payload_keys_full_text": ["descricao", "endereco", "publico", "site", "email", "certificacoes"],
+  "vector_names": {
+    "produto": "v_produto",
+    "servico": "v_servico",
+    "descricao": "v_descricao",
+    "publico": "v_publico",
+    "cliente": "v_cliente"
+  },
+  "filter_not_supported": true,
+  "full_text_filter_supported": true,
+  "bm25": {
+    "vector_name": "bm25_complete_profile",
+    "payload_keys": null
+  }
+}
+```
+
+- **dimension_keys** — Chaves obrigatórias em `vectors` e `weights` no POST `/search`.
+- **payload_keys** — Chaves de filtro **keyword** (match exato / lista).
+- **payload_keys_full_text** — Chaves de filtro **full-text** (busca por texto).
+- **vector_names** — Mapeamento chave da API → nome do vetor na coleção.
+- **filter_not_supported** — Sempre `true` (a API aceita `filter_not`).
+- **full_text_filter_supported** — `true` se houver chaves full-text configuradas.
+
+---
+
+### POST `/search`
+
+Busca por similaridade vetorial (e opcionalmente BM25), com filtros aplicados **antes** da busca.
+
+**Body (JSON):**
+
+```json
+{
+  "vectors": {
+    "produto": [0.1, -0.2, ...],
+    "servico": [...],
+    "descricao": [...],
+    "publico": [...],
+    "cliente": [...]
+  },
+  "weights": {
+    "produto": 0.2,
+    "servico": 0.2,
+    "descricao": 0.2,
+    "publico": 0.2,
+    "cliente": 0.2
+  },
+  "limit_per_vector": 50,
+  "final_limit": 20,
+  "filter": {
+    "uf": "SP",
+    "cidade": "SAO PAULO",
+    "descricao": "energia solar"
+  },
+  "filter_not": {
+    "descricao": "combustível"
+  },
+  "bm25_query": "tratamento de água"
+}
+```
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| **vectors** | Sim | Objeto com uma chave por `dimension_keys`; cada valor é um array de floats (mesma dimensão da coleção). |
+| **weights** | Sim | Pesos por dimensão (e `bm25` se usar BM25). **Soma deve ser 1.0.** |
+| **limit_per_vector** | Sim | Quantos pontos buscar por vetor (e por BM25) antes da fusão. |
+| **final_limit** | Sim | Quantos resultados finais retornar após fusão e ordenação. |
+| **filter** | Não | Filtro **positivo** (AND entre chaves). Chaves em `payload_keys` → match keyword; chaves em `payload_keys_full_text` → full-text. |
+| **filter_not** | Não | Filtro **negativo**: pontos que atendem a qualquer condição são **excluídos** (ex.: desambiguação). Mesmas chaves permitidas que `filter`. |
+| **bm25_query** | Não | Texto para busca BM25. Exige `QDRANT_BM25_VECTOR_NAME` e `weights.bm25`. |
+
+**Semântica do filter**
+
+- **Keyword** (`uf`, `cidade`, `modelo_negocio`, `nome_empresa`, `cnpj`):
+  - Valor único: match exato. `cidade` e `uf` são normalizados (maiúsculas, sem acentos).
+  - Lista ou string com vírgulas: OR (ex.: `uf: ["SP", "MG"]` ou `uf: "SP,MG"`).
+- **Full-text** (`descricao`, `endereco`, `publico`, `site`, `email`, `certificacoes`):
+  - Valor string (ou array unido por espaço): busca lexical no Qdrant (`match.text`).
+
+**Regra pós-busca:** pontos com **score 0** em **servico** e **produto** ao mesmo tempo são removidos do resultado (evita empresas irrelevantes quando essas dimensões existem).
+
+**Resposta (200):**
+
+```json
+{
+  "results": [
+    {
+      "id": 123,
+      "score_final": 0.85,
+      "payload": { "nome_empresa": "...", "cnpj": "...", "cidade": "SAO PAULO", ... },
+      "scores": { "produto": 0.9, "servico": 0.8, "descricao": 0.82, "publico": 0.79, "cliente": 0.81 }
+    }
+  ]
+}
+```
+
+Com `?debug=1`: a resposta inclui objeto `debug` (ex.: `points_per_dimension`, `total_after_merge`, `filtered_zero_servico_produto`).
+
+**Erros:** `400` (body inválido, vetor ausente, dimensões incorretas, soma de pesos ≠ 1, chave de filtro não permitida), `500` (erro no Qdrant).
+
+---
+
+### POST `/search/validate-filter`
+
+Testa o filtro **sem** busca vetorial: faz scroll no Qdrant com o filtro mesclado (filter + filter_not) e retorna quantos pontos batem e uma amostra de payloads. Útil para debugar filtros.
+
+**Body (JSON):**
+
+```json
+{
+  "filter": { "uf": "SP", "cidade": "SAO PAULO" },
+  "filter_not": { "descricao": "combustível" },
+  "limit": 100
+}
+```
+
+**Resposta (200):**
+
+```json
+{
+  "match_count": 42,
+  "filter_sent": { "must": [...], "must_not": [...] },
+  "sample_payloads": [{ "id": 1, "payload": { ... } }, ...],
+  "hint": "..."
+}
+```
+
+- Use **GET `/config`** para saber `payload_keys` e `payload_keys_full_text` permitidos.
+- Dica: cidade/UF no payload do Qdrant devem estar normalizados (maiúsculas, sem acentos). Se não houver hits, confira os dados ou a normalização no pipeline.
+
+---
+
+### GET `/health`
+
+Retorna `{ "status": "ok" }`. Use para health check (n8n, Railway, etc.).
+
+---
+
+### POST `/points/upsert`
+
+Insere/atualiza pontos na coleção em batch. Body: array de pontos ou `{ "points": [...], "batch_size": 100 }`. Cada ponto: `id`, `payload`, `vectors` (objeto com vetores nomeados). Opcionalmente vetor esparso com `{ "text": "...", "model": "qdrant/bm25" }`. Resposta: `{ "ok": true, "upserted": N, "batches": M }`. Limite do body: 50 MB por padrão (`UPSERT_BODY_LIMIT`).
+
+---
+
+### POST `/company-profiles/mark-vectorized`
+
+Marca perfis como vetorizados no PostgreSQL (`busca_fornecedor.company_profile`, coluna `qdrant = true`). Requer `DB_URL`.
+
+**Body:** `{ "cnpjs": ["...", ...] }` ou array direto `["...", ...]`. Resposta: `{ "ok": true, "message": "...", "updated": N, "chunks": M, "concurrency": K }`. Processamento em chunks com workers em paralelo.
+
+---
+
+### Pipeline de vetorização
+
+Fluxo: **PostgreSQL (empresas não vetorizadas) → transformação de perfil → embeddings OpenAI → upsert Qdrant → mark vectorized**.
+
+- **POST `/pipeline/run`** — Inicia o pipeline. Body: `{ "limit": number }` (ex.: 5000). Resposta **202** com `dashboard_url`, `status_url`, `stream_url`. Se já estiver rodando: **409**.
+- **GET `/pipeline/status`** — Estado atual (JSON): status, tempos, totais, taxas.
+- **GET `/pipeline/stream`** — SSE: envia estado a cada ~1,5 s enquanto estiver rodando.
+- **GET `/pipeline/dashboard`** — Página HTML que consome o stream e exibe métricas; inclui formulário para iniciar com um limite.
+
+Requisitos: `DB_URL`, `COLLECTION_NAME`, `OPENAI_API_KEY`, variáveis do Qdrant. Opcionais: `OPENAI_EMBED_BATCH_SIZE`, `PIPELINE_CHUNK_SIZE`, `UPSERT_BATCH_SIZE`, `QDRANT_UPSERT_WAIT`, `QDRANT_UPSERT_CONCURRENCY`, `QDRANT_UPSERT_MAX_BATCH`.
 
 ---
 
 ## Uso no n8n
 
-Use o nó **HTTP Request** para chamar a API.
-
-1. **Método:** `POST`
-2. **URL:** `https://SUA-URL-RAILWAY.up.railway.app/search`
-3. **Authentication:** None (ou adicione header de API key se você implementar depois).
-4. **Body Content Type:** `JSON`
-5. **Specify Body:** Using JSON
-6. **JSON Body:** use uma expressão que monte o payload ou um JSON fixo, por exemplo:
-
-```json
-{
-  "vectors": {
-    "segmento": {{ $json.embedding_segmento }},
-    "produtos": {{ $json.embedding_produtos }},
-    "clientes": {{ $json.embedding_clientes }}
-  },
-  "weights": {
-    "segmento": 0.4,
-    "produtos": 0.3,
-    "clientes": 0.3
-  },
-  "limit_per_vector": 50,
-  "final_limit": 20
-}
-```
-
-Se os embeddings vierem de nós anteriores (ex.: OpenAI Embeddings ou outro modelo), mapeie os outputs para `embedding_segmento`, `embedding_produtos` e `embedding_clientes` e use `$json.embedding_segmento` etc. no body.
-
-**Resposta:** em `$json.results` você terá o array de empresas ordenadas por `score_final`, cada item com `id`, `score_final`, `payload` (nome_empresa, cnpj, etc.) e `scores` por dimensão.
-
-**Health check no n8n:** use um HTTP Request `GET` em `.../health` para verificar se a API está no ar antes de chamar o `/search`. Use **GET `/config`** para listar os payloads e vetores disponíveis (filtro, vetores densos, BM25).
-
-**Teste rápido:** para testar sem embeddings dinâmicos, use no body arrays de mesmo tamanho da sua coleção (ex.: 1536 floats). Pode gerar no n8n com um nó Code que retorne `vectors: { segmento: [...], produtos: [...], clientes: [...] }` ou colar um JSON de teste.
+1. **HTTP Request** — Método `POST`, URL `https://SUA-URL-RAILWAY.up.railway.app/search`, Body Content Type `JSON`, body com `vectors`, `weights`, `limit_per_vector`, `final_limit` e opcionalmente `filter`, `filter_not`, `bm25_query`.
+2. As chaves de `vectors` e `weights` devem ser exatamente as retornadas em **GET `/config`** em `dimension_keys` (e `bm25` em weights se usar BM25).
+3. Para filtros, use chaves de `payload_keys` (keyword) e/ou `payload_keys_full_text` (full-text). Ex.: `filter: { uf: "SP", descricao: "energia solar" }`.
+4. **GET `/config`** — para listar dimension_keys, payload_keys, payload_keys_full_text e vector_names.
+5. **GET `/health`** — para verificar se a API está no ar.
 
 ---
 
@@ -99,172 +271,27 @@ npm install
 npm start
 ```
 
-## Endpoint
+API sobe em `http://0.0.0.0:3000` (ou `PORT`/`HOST` definidos no `.env`).
 
-### POST `/search`
-
-**Body (JSON):**
-
-```json
-{
-  "vectors": {
-    "segmento": [float, ...],
-    "produtos": [float, ...],
-    "clientes": [float, ...]
-  },
-  "weights": {
-    "segmento": 0.35,
-    "produtos": 0.35,
-    "clientes": 0.2,
-    "bm25": 0.1
-  },
-  "limit_per_vector": 50,
-  "final_limit": 20,
-  "filter": {
-    "industria": "Fabricante",
-    "modelo_negocio": "B2B"
-  },
-  "bm25_query": "tratamento de água ETE"
-}
-```
-
-- Soma de `weights` deve ser `1.0`. Com BM25, inclua a chave **`bm25`** em `weights` (densos + bm25 = 1).
-- Os vetores são obrigatórios para cada chave em `dimension_keys` (veja GET `/config`). Com 3 dimensões (padrão): `segmento`, `produtos`, `clientes`. Com 5: as chaves definidas em `QDRANT_DIMENSION_KEYS` (ex.: `capacidades`, `produtos`, `clientes`, `descricao`, `servico`). Todos os vetores devem ter a mesma dimensão da coleção.
-- **filter** (opcional): objeto com chaves de payload e valores exatos. Só chaves listadas em `QDRANT_PAYLOAD_KEYS` são aceitas. O filtro é aplicado no Qdrant **antes** da busca por similaridade.
-- **bm25_query** (opcional): texto para busca BM25. Exige `QDRANT_BM25_VECTOR_NAME` e **`weights.bm25`** (soma total = 1).
-
-**Exemplo com 5 vetores** (quando `QDRANT_DIMENSION_KEYS` e `QDRANT_VECTOR_NAMES` têm 5 itens):
-
-```json
-{
-  "vectors": {
-    "capacidades": [float, ...],
-    "produtos": [float, ...],
-    "clientes": [float, ...],
-    "descricao": [float, ...],
-    "servico": [float, ...]
-  },
-  "weights": {
-    "capacidades": 0.2,
-    "produtos": 0.2,
-    "clientes": 0.2,
-    "descricao": 0.2,
-    "servico": 0.2
-  },
-  "limit_per_vector": 50,
-  "final_limit": 20
-}
-```
-
-**Resposta (200):**
-
-```json
-{
-  "results": [
-    {
-      "id": 123,
-      "score_final": 0.85,
-      "payload": { "nome_empresa": "...", "cnpj": "...", ... },
-      "scores": { "segmento": 0.9, "produtos": 0.8, "clientes": 0.82, "bm25": 0.75 }
-    }
-  ]
-}
-```
-
-Ordenação: `score_final` decrescente. Com `bm25_query`, `scores.bm25` traz o score BM25 e o `score_final` é a combinação ponderada.
-
-**Erros:** `400` (vetor ausente, dimensões inválidas, soma de pesos ≠ 1, bm25_query sem QDRANT_BM25_VECTOR_NAME ou sem weights.bm25), `500` (erro no Qdrant).
-
-**Debug (resultado vazio):** adicione `?debug=1` na URL do POST (ex.: `POST /search?debug=1`). A resposta virá com `results` e um objeto `debug`: `points_per_dimension` (quantos pontos cada busca densa e a BM25 retornaram), `total_after_merge` e `returned`. Se todos forem 0, o filtro pode não bater com nenhum ponto ou a coleção está vazia.
-
-### POST `/points/upsert`
-
-Insere pontos na coleção Qdrant (variável `COLLECTION_NAME`) em batch. O body pode ser:
-
-1. **Array no formato do arquivo de lista:** `[ { "point": [ { "id", "payload", "vectors" } ] }, ... ]` ou `[ { "id", "payload", "vectors" }, ... ]`.
-2. **Objeto com lista:** `{ "points": [ ... ], "batch_size": 100 }` — `batch_size` (opcional) é o tamanho de cada lote enviado ao Qdrant (1–500; padrão 100).
-
-Cada ponto deve ter `id`, `payload` (objeto) e `vectors` (objeto com vetores nomeados: arrays de números ou, para BM25, `{ "text": "...", "model": "qdrant/bm25" }`). A API normaliza o JSON e envia em lotes ao Qdrant.
-
-**Resposta (200):** `{ "ok": true, "upserted": N, "batches": M }`.
-
-**Limite do body:** 50 MB por padrão (variável `UPSERT_BODY_LIMIT`). Para listas muito grandes, envie em múltiplas requisições ou aumente o limite.
-
-### GET `/config`
-
-Retorna os payloads e vetores disponíveis conforme as variáveis de ambiente (sem chamar o Qdrant). Útil para saber quais chaves usar em `filter`, quais vetores densos existem e se o BM25 está configurado.
-
-**Resposta (200):**
-
-```json
-{
-  "dimension_keys": ["segmento", "produtos", "clientes"],
-  "payload_keys": ["industria", "modelo_negocio", "nome_empresa"],
-  "vector_names": {
-    "segmento": "v_capacidades",
-    "produtos": "v_produtos",
-    "clientes": "v_clientes"
-  },
-  "bm25": {
-    "vector_name": "bm25_texto",
-    "payload_keys": ["descricao", "segmento", "categoria", "subcategoria"]
-  }
-}
-```
-
-- **dimension_keys**: chaves que devem aparecer em `vectors` e `weights` no POST `/search` (variável `QDRANT_DIMENSION_KEYS` ou padrão segmento, produtos, clientes).
-- **payload_keys**: chaves de payload permitidas para filtro (variável `QDRANT_PAYLOAD_KEYS`). Use essas chaves no corpo `filter` do POST `/search`.
-- **vector_names**: mapeamento da chave da API para o nome do vetor na coleção Qdrant (`QDRANT_VECTOR_NAMES`).
-- **bm25.vector_name**: nome do vetor esparso BM25 na coleção (`QDRANT_BM25_VECTOR_NAME`); `null` se não configurado.
-- **bm25.payload_keys**: payloads que alimentam o vetor BM25 (`QDRANT_BM25_PAYLOAD_KEYS`, opcional); `null` se não definido.
-
-### GET `/health`
-
-Retorna `{ "status": "ok" }`.
-
-### POST `/company-profiles/mark-vectorized`
-
-Marca perfis como vetorizados no PostgreSQL: atualiza `busca_fornecedor.company_profile` setando `qdrant = true` onde `cnpj` está na lista enviada. Resposta **síncrona** — a API só responde após concluir todas as atualizações, para o fluxo de vetorização poder prosseguir na ordem correta.
-
-**Requisito:** variável de ambiente `DB_URL` (connection string PostgreSQL).
-
-**Body (JSON):** `{ "cnpjs": ["12345678", "87654321", ...] }` ou array direto `["12345678", ...]`. CNPJs são normalizados (trim, únicos).
-
-**Resposta (200):** `{ "ok": true, "message": "Perfis marcados como vetorizados. Pode prosseguir com a próxima leva.", "updated": N, "chunks": M, "concurrency": K }`.
-
-**Otimização:** a lista é processada em chunks (padrão 1000 CNPJs por UPDATE) com até 8 workers em paralelo, sem estourar o pool de conexões. Só linhas com `qdrant` false ou null são atualizadas.
-
-### Pipeline de vetorização end-to-end
-
-A API pode executar o fluxo completo **Busca empresas (Supabase) → Embeddings (OpenAI) → Upsert (Qdrant) → Mark vectorized (Supabase)** em background, com métricas em tempo real.
-
-**Requisitos:** `DB_URL`, `COLLECTION_NAME`, `OPENAI_API_KEY`, além das variáveis do Qdrant.
-
-- **POST `/pipeline/run`** — Inicia o pipeline. Body: `{ "limit": number }` (ex.: 5000). Resposta **202** com `dashboard_url`, `status_url`, `stream_url`. Se já estiver rodando, retorna **409**.
-- **GET `/pipeline/status`** — Retorna o estado atual (JSON): status, tempos por etapa, totais e taxas de sucesso.
-- **GET `/pipeline/stream`** — Server-Sent Events: envia o estado a cada ~1,5 s enquanto o pipeline está em execução; encerra ao completar ou falhar.
-- **GET `/pipeline/dashboard`** — Página HTML que conecta ao stream e exibe tempo de processo e taxa de sucesso de cada etapa; inclui formulário para iniciar o pipeline com um limite.
-
-Variáveis opcionais: `OPENAI_EMBED_BATCH_SIZE` (padrão 200), `PIPELINE_CHUNK_SIZE` (padrão 200), `UPSERT_BATCH_SIZE` (padrão 500), `QDRANT_UPSERT_WAIT` (padrão false = não espera indexação, maior throughput), `QDRANT_UPSERT_CONCURRENCY` (padrão 3 = até 3 upserts em paralelo), `QDRANT_UPSERT_MAX_BATCH` (máx. pontos por request, padrão 1000).
-
-**Performance e limites (plano gratuito):** Qdrant Cloud free tier tem 1 GB de armazenamento; rate limits não são documentados — use `QDRANT_UPSERT_CONCURRENCY=2` ou `3` para não sobrecarregar. Com `QDRANT_UPSERT_WAIT=false` o tempo de upsert cai bastante (indexação em background). OpenAI: respeite RPM/TPM do seu tier (ex.: Tier 1 ~500 RPM); batch de embeddings 200 reduz o número de requests.
+---
 
 ## Estrutura do projeto
 
 ```
 src/
-  server.js            # Express, /search, /points/upsert, /company-profiles/mark-vectorized, /pipeline/*
-  qdrantClient.js     # Cliente Qdrant (Cloud)
-  multiVectorSearch.js # Busca por vetores nomeados e fusão (RRF/BM25)
-  upsertPoints.js     # Normalização e upsert em batch no Qdrant
-  db.js               # Pool PostgreSQL (DB_URL)
-  markVectorized.js   # Atualização em batch de qdrant=true por CNPJ
-  fetchCompanyProfiles.js # SELECT company_profile WHERE qdrant = false (pipeline)
-  transformProfile.js # full_profile → vetores + payload (espelho n8n)
-  embeddings.js       # OpenAI text-embedding-3-small em batch
-  pipeline.js         # Orquestração fetch → transform → embed → upsert → mark
-  dashboardHtml.js    # HTML do dashboard de métricas (SSE)
-  logger.js           # Log estruturado
+  server.js              # Express: /search, /search/validate-filter, /config, /health, /points/upsert, /company-profiles/mark-vectorized, /pipeline/*
+  qdrantClient.js        # Cliente Qdrant Cloud
+  multiVectorSearch.js   # Busca por vetores nomeados, fusão, BM25, remoção score 0 servico/produto
+  upsertPoints.js        # Normalização e upsert em batch
+  db.js                  # Pool PostgreSQL
+  markVectorized.js      # Atualização qdrant=true por CNPJ
+  fetchCompanyProfiles.js
+  transformProfile.js    # Perfil → vetores + payload (filledVectorKeys, normalizeKeyword cidade/uf)
+  embeddings.js         # OpenAI embeddings em batch
+  pipeline.js            # Orquestração fetch → transform → embed → upsert → mark
+  dashboardHtml.js
+  normalizeKeyword.js    # NFD, sem acentos, maiúsculas (cidade/uf no filtro e payload)
+  logger.js
 .env
 package.json
 ```

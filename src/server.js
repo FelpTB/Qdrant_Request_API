@@ -150,11 +150,36 @@ function getVectorNamesMap() {
   return map;
 }
 
-/** Lista de chaves de payload permitidas para filtro (env QDRANT_PAYLOAD_KEYS, ex.: nome_empresa,industria,modelo_negocio). */
+/** Chaves de payload permitidas para filtro keyword (env QDRANT_PAYLOAD_KEYS). Se vazio, usa as chaves keyword do esquema da coleção. */
+const DEFAULT_PAYLOAD_KEYS = ["modelo_negocio", "cidade", "uf", "nome_empresa", "cnpj"];
+
 function getAllowedPayloadKeys() {
   const env = process.env.QDRANT_PAYLOAD_KEYS;
-  if (!env || typeof env !== "string") return [];
-  return env.split(",").map((s) => s.trim()).filter(Boolean);
+  if (env && typeof env === "string") {
+    const keys = env.split(",").map((s) => s.trim()).filter(Boolean);
+    if (keys.length > 0) return keys;
+  }
+  return DEFAULT_PAYLOAD_KEYS;
+}
+
+/** Chaves de payload com índice full-text no Qdrant (env QDRANT_PAYLOAD_KEYS_TEXT). Usadas em filter com match.text. Se vazio, nenhum filtro full-text. */
+const DEFAULT_PAYLOAD_KEYS_TEXT = ["descricao", "endereco", "publico", "site", "email", "certificacoes"];
+
+function getFullTextPayloadKeys() {
+  const env = process.env.QDRANT_PAYLOAD_KEYS_TEXT;
+  if (env && typeof env === "string") {
+    const keys = env.split(",").map((s) => s.trim()).filter(Boolean);
+    if (keys.length > 0) return keys;
+  }
+  return DEFAULT_PAYLOAD_KEYS_TEXT;
+}
+
+/** Todas as chaves permitidas para filter/filter_not: keyword + full-text (sem duplicatas). */
+function getAllowedFilterKeys() {
+  const keyword = getAllowedPayloadKeys();
+  const text = getFullTextPayloadKeys();
+  const set = new Set([...keyword, ...text]);
+  return [...set];
 }
 
 /** Lista de chaves de payload usadas para construir o vetor BM25 (env QDRANT_BM25_PAYLOAD_KEYS, opcional). */
@@ -224,17 +249,26 @@ const FILTER_KEYS_NORMALIZE = ["cidade", "uf"];
 
 /**
  * Constrói o filtro Qdrant.
- * - Valores únicos ou lista com 1 item → must com match.value.
- * - Lista com vários itens → must com match.any (um único array), evitando centenas de condições em should.
+ * - Chaves em fullTextKeys → match.text (full-text no Qdrant); valor string ou array unido por espaço.
+ * - Chaves em keywordKeys → match.value / match.any (keyword).
  */
-function buildQdrantFilter(payloadFilter, allowedKeys) {
-  if (!payloadFilter || typeof payloadFilter !== "object" || allowedKeys.length === 0)
-    return null;
+function buildQdrantFilter(payloadFilter, keywordKeys, fullTextKeys = []) {
+  if (!payloadFilter || typeof payloadFilter !== "object") return null;
   const must = [];
   for (const [key, value] of Object.entries(payloadFilter)) {
-    if (!allowedKeys.includes(key)) continue;
     const raw = value;
     if (raw === undefined || raw === null) continue;
+
+    if (fullTextKeys.includes(key)) {
+      const textQuery = Array.isArray(raw)
+        ? raw.filter((v) => !isFilterValueEmpty(v)).map(String).join(" ").trim()
+        : typeof raw === "string" ? raw.trim() : String(raw).trim();
+      if (!textQuery) continue;
+      must.push({ key, match: { text: textQuery } });
+      continue;
+    }
+
+    if (!keywordKeys.includes(key)) continue;
     const valueNorm = normalizeFilterValue(raw);
     if (valueNorm === undefined || valueNorm === null) continue;
     const normalize = (v) =>
@@ -260,13 +294,70 @@ function buildQdrantFilter(payloadFilter, allowedKeys) {
   return must.length > 0 ? { must } : null;
 }
 
-/** Valida request e retorna erro { status, message } ou null. */
+/**
+ * Constrói o filtro negativo Qdrant (must_not).
+ * Chaves em fullTextKeys usam match.text; chaves em keywordKeys usam match.value / match.any.
+ */
+function buildQdrantFilterNot(payloadFilterNot, keywordKeys, fullTextKeys = []) {
+  if (!payloadFilterNot || typeof payloadFilterNot !== "object") return null;
+  const must_not = [];
+  for (const [key, value] of Object.entries(payloadFilterNot)) {
+    const raw = value;
+    if (raw === undefined || raw === null) continue;
+
+    if (fullTextKeys.includes(key)) {
+      const textQuery = Array.isArray(raw)
+        ? raw.filter((v) => !isFilterValueEmpty(v)).map(String).join(" ").trim()
+        : typeof raw === "string" ? raw.trim() : String(raw).trim();
+      if (!textQuery) continue;
+      must_not.push({ key, match: { text: textQuery } });
+      continue;
+    }
+
+    if (!keywordKeys.includes(key)) continue;
+    const valueNorm = normalizeFilterValue(raw);
+    if (valueNorm === undefined || valueNorm === null) continue;
+    const normalize = (v) =>
+      typeof v === "string" && FILTER_KEYS_NORMALIZE.includes(key) ? normalizeKeyword(v) : v;
+    if (Array.isArray(valueNorm)) {
+      const values = valueNorm.filter(
+        (v) =>
+          !isFilterValueEmpty(v) &&
+          (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+      );
+      if (values.length === 0) continue;
+      const normalized = values.map((v) => normalize(v));
+      if (normalized.length === 1) {
+        must_not.push({ key, match: { value: normalized[0] } });
+      } else {
+        must_not.push({ key, match: { any: normalized } });
+      }
+    } else {
+      if (isFilterValueEmpty(valueNorm)) continue;
+      must_not.push({ key, match: { value: normalize(valueNorm) } });
+    }
+  }
+  return must_not.length > 0 ? { must_not } : null;
+}
+
+/** Mescla filtro positivo (must) com filtro negativo (must_not) para enviar ao Qdrant. */
+function mergeQdrantFilter(positive, negative) {
+  const hasPositive = positive && (positive.must?.length > 0 || positive.should?.length > 0);
+  const hasNegative = negative && negative.must_not?.length > 0;
+  if (!hasPositive && !hasNegative) return null;
+  const out = {};
+  if (hasPositive) {
+    if (positive.must?.length) out.must = positive.must;
+    if (positive.should?.length) out.should = positive.should;
+  }
+  if (hasNegative) out.must_not = negative.must_not;
+  return Object.keys(out).length > 0 ? out : null;
+}
 function validateSearchBody(body) {
   if (!body || typeof body !== "object")
     return { status: 400, message: "Request body inválido" };
 
-  const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query } = body;
-  const allowedPayloadKeys = getAllowedPayloadKeys();
+  const { vectors, weights, limit_per_vector, final_limit, filter, filter_not, bm25_query } = body;
   const dimensionKeys = getDimensionKeys();
   const useBm25 = bm25_query != null && bm25_query !== undefined;
 
@@ -277,14 +368,24 @@ function validateSearchBody(body) {
     if (!bm25VectorName)
       return { status: 400, message: "Para usar BM25 configure QDRANT_BM25_VECTOR_NAME no ambiente (nome do vetor esparso da coleção)" };
   }
+  const allowedFilterKeys = getAllowedFilterKeys();
   if (filter != null && filter !== undefined) {
     if (typeof filter !== "object" || Array.isArray(filter))
       return { status: 400, message: "Campo 'filter' deve ser um objeto" };
-    if (allowedPayloadKeys.length === 0)
-      return { status: 400, message: "Configure QDRANT_PAYLOAD_KEYS no ambiente para usar filtros de payload" };
-    const invalidKeys = Object.keys(filter).filter((k) => !allowedPayloadKeys.includes(k));
+    if (allowedFilterKeys.length === 0)
+      return { status: 400, message: "Configure QDRANT_PAYLOAD_KEYS e/ou QDRANT_PAYLOAD_KEYS_TEXT no ambiente para usar filtros" };
+    const invalidKeys = Object.keys(filter).filter((k) => !allowedFilterKeys.includes(k));
     if (invalidKeys.length > 0)
-      return { status: 400, message: `Chaves de filtro não permitidas: ${invalidKeys.join(", ")}. Permitidas: ${allowedPayloadKeys.join(", ")}` };
+      return { status: 400, message: `Chaves de filtro não permitidas: ${invalidKeys.join(", ")}. Permitidas: ${allowedFilterKeys.join(", ")}` };
+  }
+  if (filter_not != null && filter_not !== undefined) {
+    if (typeof filter_not !== "object" || Array.isArray(filter_not))
+      return { status: 400, message: "Campo 'filter_not' deve ser um objeto" };
+    if (allowedFilterKeys.length === 0)
+      return { status: 400, message: "Configure QDRANT_PAYLOAD_KEYS e/ou QDRANT_PAYLOAD_KEYS_TEXT no ambiente para usar filtros negativos (filter_not)" };
+    const invalidKeys = Object.keys(filter_not).filter((k) => !allowedFilterKeys.includes(k));
+    if (invalidKeys.length > 0)
+      return { status: 400, message: `Chaves de filter_not não permitidas: ${invalidKeys.join(", ")}. Permitidas: ${allowedFilterKeys.join(", ")}` };
   }
 
   if (!vectors || typeof vectors !== "object")
@@ -333,12 +434,15 @@ app.post("/search", async (req, res) => {
     return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
   }
 
-  const { vectors, weights, limit_per_vector, final_limit, filter, bm25_query } = req.body;
+  const { vectors, weights, limit_per_vector, final_limit, filter, filter_not, bm25_query } = req.body;
   const dimensionKeys = getDimensionKeys();
   const useBm25 = bm25_query != null && bm25_query !== "";
   const w = normalizeWeights(weights, dimensionKeys, useBm25);
-  const allowedPayloadKeys = getAllowedPayloadKeys();
-  const qdrantFilter = buildQdrantFilter(filter, allowedPayloadKeys);
+  const keywordKeys = getAllowedPayloadKeys();
+  const fullTextKeys = getFullTextPayloadKeys();
+  const qdrantFilterPositive = buildQdrantFilter(filter, keywordKeys, fullTextKeys);
+  const qdrantFilterNegative = buildQdrantFilterNot(filter_not, keywordKeys, fullTextKeys);
+  const qdrantFilter = mergeQdrantFilter(qdrantFilterPositive, qdrantFilterNegative);
 
   const vectorsForSearch = {};
   for (const dim of dimensionKeys) vectorsForSearch[dim] = vectors[dim];
@@ -383,25 +487,37 @@ app.post("/search/validate-filter", express.json(), async (req, res) => {
   if (!COLLECTION_NAME) {
     return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
   }
-  const allowedPayloadKeys = getAllowedPayloadKeys();
-  if (allowedPayloadKeys.length === 0) {
+  const allowedFilterKeys = getAllowedFilterKeys();
+  if (allowedFilterKeys.length === 0) {
     return res.status(400).json({
-      error: "Configure QDRANT_PAYLOAD_KEYS no ambiente para usar filtros",
+      error: "Configure QDRANT_PAYLOAD_KEYS e/ou QDRANT_PAYLOAD_KEYS_TEXT no ambiente para usar filtros",
     });
   }
   const filter = req.body?.filter;
+  const filter_not = req.body?.filter_not;
   if (filter != null && (typeof filter !== "object" || Array.isArray(filter))) {
     return res.status(400).json({ error: "Campo 'filter' deve ser um objeto" });
   }
-  const invalidKeys = filter
-    ? Object.keys(filter).filter((k) => !allowedPayloadKeys.includes(k))
-    : [];
+  let invalidKeys = filter ? Object.keys(filter).filter((k) => !allowedFilterKeys.includes(k)) : [];
   if (invalidKeys.length > 0) {
     return res.status(400).json({
-      error: `Chaves de filtro não permitidas: ${invalidKeys.join(", ")}. Permitidas: ${allowedPayloadKeys.join(", ")}`,
+      error: `Chaves de filtro não permitidas: ${invalidKeys.join(", ")}. Permitidas: ${allowedFilterKeys.join(", ")}`,
     });
   }
-  const qdrantFilter = buildQdrantFilter(filter || {}, allowedPayloadKeys);
+  if (filter_not != null && (typeof filter_not !== "object" || Array.isArray(filter_not))) {
+    return res.status(400).json({ error: "Campo 'filter_not' deve ser um objeto" });
+  }
+  invalidKeys = filter_not ? Object.keys(filter_not).filter((k) => !allowedFilterKeys.includes(k)) : [];
+  if (invalidKeys.length > 0) {
+    return res.status(400).json({
+      error: `Chaves de filter_not não permitidas: ${invalidKeys.join(", ")}. Permitidas: ${allowedFilterKeys.join(", ")}`,
+    });
+  }
+  const keywordKeys = getAllowedPayloadKeys();
+  const fullTextKeys = getFullTextPayloadKeys();
+  const qdrantFilterPositive = buildQdrantFilter(filter || {}, keywordKeys, fullTextKeys);
+  const qdrantFilterNegative = buildQdrantFilterNot(filter_not || {}, keywordKeys, fullTextKeys);
+  const qdrantFilter = mergeQdrantFilter(qdrantFilterPositive, qdrantFilterNegative);
   const limit = Math.min(500, Math.max(10, Number(req.body?.limit) || 100));
   try {
     const result = await qdrantClient.scroll(COLLECTION_NAME, {
@@ -444,6 +560,7 @@ app.post("/search/validate-filter", express.json(), async (req, res) => {
 app.get("/config", (_req, res) => {
   const dimension_keys = getDimensionKeys();
   const payload_keys = getAllowedPayloadKeys();
+  const payload_keys_full_text = getFullTextPayloadKeys();
   const vector_names = getVectorNamesMap();
   const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim() || null;
   const bm25_payload_keys = getBm25PayloadKeys();
@@ -452,7 +569,10 @@ app.get("/config", (_req, res) => {
   return res.json({
     dimension_keys,
     payload_keys,
+    payload_keys_full_text: payload_keys_full_text.length > 0 ? payload_keys_full_text : null,
     vector_names,
+    filter_not_supported: true,
+    full_text_filter_supported: payload_keys_full_text.length > 0,
     bm25: {
       vector_name: bm25VectorName,
       payload_keys: bm25_payload_keys.length > 0 ? bm25_payload_keys : null,
