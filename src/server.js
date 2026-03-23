@@ -1,5 +1,6 @@
 import express from "express";
 import { multiVectorSearch } from "./multiVectorSearch.js";
+import { llmRerank } from "./llmRerank.js";
 import qdrantClient from "./qdrantClient.js";
 import { normalizePointsInput, upsertPointsBatch } from "./upsertPoints.js";
 import { markAsVectorized } from "./markVectorized.js";
@@ -493,7 +494,7 @@ app.post("/search", async (req, res) => {
     return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
   }
 
-  const { vectors, weights, limit_per_vector, final_limit, filter, filter_not, bm25_query } = req.body;
+  const { vectors, weights, limit_per_vector, final_limit, filter, filter_not, bm25_query, query_text } = req.body;
   const dimensionKeys = getDimensionKeys();
   const useBm25 = bm25_query != null && bm25_query !== "";
   const w = normalizeWeights(weights, dimensionKeys, useBm25);
@@ -507,6 +508,7 @@ app.post("/search", async (req, res) => {
   const vectorsForSearch = {};
   for (const dim of dimensionKeys) vectorsForSearch[dim] = vectors[dim];
   const debugMode = req.query.debug === "1";
+  const rerankMode = req.query.rerank === "1" || req.body.rerank === true;
 
   try {
     const out = await multiVectorSearch({
@@ -522,12 +524,54 @@ app.post("/search", async (req, res) => {
       returnDebugCounts: debugMode,
     });
 
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    if (debugMode && typeof out === "object" && out.results && out.debug) {
-      out.debug.filter_sent = qdrantFilter;
-      return res.json(out);
+    const searchResults = debugMode ? out.results : (out.results ?? out);
+    const llmPool = out.llm_rerank_pool ?? [];
+    const restPool = out.rest_after_pool ?? [];
+
+    let finalResults = searchResults;
+    let rerankInfo = null;
+
+    if (rerankMode && llmPool.length > 0) {
+      const queryForRerank = typeof query_text === "string" && query_text.trim()
+        ? query_text.trim()
+        : typeof bm25_query === "string" ? bm25_query.trim() : "";
+
+      if (queryForRerank) {
+        try {
+          const { reranked, tokens_used, model } = await llmRerank(
+            queryForRerank,
+            typeof bm25_query === "string" ? bm25_query : null,
+            llmPool
+          );
+          finalResults = [...reranked, ...restPool].slice(0, final_limit);
+          rerankInfo = {
+            enabled: true,
+            model,
+            tokens_used,
+            pool_size: llmPool.length,
+            query_used: queryForRerank,
+          };
+        } catch (rerankErr) {
+          console.error("[rerank] LLM re-ranking falhou, usando ordem original:", rerankErr.message);
+          rerankInfo = { enabled: true, error: rerankErr.message, fallback: "original_order" };
+        }
+      }
     }
-    return res.json(typeof out === "object" && out.results && out.debug ? out : { results: out });
+
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+
+    if (debugMode && out.debug) {
+      out.debug.filter_sent = qdrantFilter;
+      return res.json({
+        results: finalResults,
+        rerank: rerankInfo,
+        debug: out.debug,
+      });
+    }
+
+    const response = { results: finalResults };
+    if (rerankInfo) response.rerank = rerankInfo;
+    return res.json(response);
   } catch (err) {
     const status = err.status ?? err.statusCode ?? 500;
     const message =
@@ -626,8 +670,11 @@ app.get("/config", (_req, res) => {
   const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim() || null;
   const bm25_payload_keys = getBm25PayloadKeys();
 
+  const rrfK = Number(process.env.RRF_K);
+
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   return res.json({
+    architecture: "dual-path-rrf-v5",
     dimension_keys,
     payload_keys,
     payload_keys_full_text: payload_keys_full_text.length > 0 ? payload_keys_full_text : null,
@@ -637,6 +684,22 @@ app.get("/config", (_req, res) => {
     bm25: {
       vector_name: bm25VectorName,
       payload_keys: bm25_payload_keys.length > 0 ? bm25_payload_keys : null,
+      rrf_k: Number.isFinite(rrfK) ? rrfK : 20,
+    },
+    dual_path: {
+      paths: ["A (BM25-First)", "B (Dense-First + BM25 Modifier)"],
+      rrf_k: 10,
+      path_top_n: Number(process.env.PATH_TOP_N) || 20,
+      bm25_modifier: {
+        boost: Number(process.env.BM25_MODIFIER_BOOST) || 1.0,
+        absent_factor: Number(process.env.BM25_MODIFIER_ABSENT) || 0.85,
+      },
+    },
+    llm_rerank: {
+      enabled: Boolean(process.env.OPENAI_API_KEY),
+      model: process.env.LLM_RERANK_MODEL || "gpt-4o-mini",
+      pool_size: Number(process.env.LLM_RERANK_POOL) || 20,
+      usage: "Envie rerank=1 como query param ou rerank: true no body para ativar. Inclua query_text com a busca original.",
     },
   });
 });
