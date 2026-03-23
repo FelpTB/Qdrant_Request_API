@@ -261,37 +261,61 @@ export async function multiVectorSearch({
   const pathA = runPathA(densePrefetchById, bm25ById, dimensionKeys, denseWeights, bm25Weight, topN);
   const pathB = runPathB(denseFullById, bm25ById, dimensionKeys, denseWeights, topN);
 
-  // Stage 3: RRF merge — direct A+B, no abstraction needed
-  const rankA = {};
-  pathA.forEach((item, i) => { rankA[item.id] = i + 1; });
-  const rankB = {};
-  pathB.forEach((item, i) => { rankB[item.id] = i + 1; });
-
-  const allPayloads = {};
-  for (const item of pathA) { if (!allPayloads[item.id]) allPayloads[item.id] = item.payload; }
-  for (const item of pathB) { if (!allPayloads[item.id]) allPayloads[item.id] = item.payload; }
+  // Stage 3: RRF merge — direct A+B with per-dimension score propagation
+  const pathAById = {};
+  pathA.forEach((item, i) => { pathAById[item.id] = { ...item, rank: i + 1 }; });
+  const pathBById = {};
+  pathB.forEach((item, i) => { pathBById[item.id] = { ...item, rank: i + 1 }; });
 
   const allIds = new Set([...pathA.map((i) => i.id), ...pathB.map((i) => i.id)]);
   const merged = [];
 
   for (const pid of allIds) {
-    const inA = rankA[pid];
-    const inB = rankB[pid];
-    let score = 0;
+    const itemA = pathAById[pid];
+    const itemB = pathBById[pid];
+    let rrfScore = 0;
     const paths = [];
-    if (inA) { score += 1 / (RRF_K + inA); paths.push(`A#${inA}`); }
-    if (inB) { score += 1 / (RRF_K + inB); paths.push(`B#${inB}`); }
+    if (itemA) { rrfScore += 1 / (RRF_K + itemA.rank); paths.push(`A#${itemA.rank}`); }
+    if (itemB) { rrfScore += 1 / (RRF_K + itemB.rank); paths.push(`B#${itemB.rank}`); }
+
+    const avgDimScores = {};
+    for (const dim of dimensionKeys) {
+      const vA = itemA?.dim_scores?.[dim];
+      const vB = itemB?.dim_scores?.[dim];
+      if (vA !== undefined && vB !== undefined) {
+        avgDimScores[dim] = (vA + vB) / 2;
+      } else {
+        avgDimScores[dim] = vA ?? vB ?? 0;
+      }
+    }
+
+    const bm25A = itemA?.bm25_norm ?? 0;
+    const bm25B = itemB?.bm25_norm ?? 0;
+    const avgBm25 = (itemA && itemB) ? (bm25A + bm25B) / 2 : (bm25A || bm25B);
+
+    let scorePonderado = 0;
+    for (const dim of dimensionKeys) {
+      scorePonderado += avgDimScores[dim] * (denseWeights[dim] ?? 0);
+    }
+    scorePonderado += bm25Weight * avgBm25;
+
+    const round4 = (n) => Math.round(n * 1e4) / 1e4;
+    const scores = {};
+    for (const dim of dimensionKeys) scores[dim] = round4(avgDimScores[dim]);
+    scores.bm25 = round4(avgBm25);
 
     merged.push({
       id: pid,
-      payload: allPayloads[pid],
-      score_final: score,
+      payload: itemA?.payload ?? itemB?.payload ?? {},
+      score_final: Math.round(scorePonderado * 1e6) / 1e6,
+      score_rrf: Math.round(rrfScore * 1e6) / 1e6,
+      scores,
       paths,
       n_paths: paths.length,
-      in_both: Boolean(inA && inB),
+      in_both: Boolean(itemA && itemB),
     });
   }
-  merged.sort((a, b) => b.score_final - a.score_final);
+  merged.sort((a, b) => b.score_rrf - a.score_rrf);
 
   // Stage 4: Post-processing filters
   let filtered = merged;

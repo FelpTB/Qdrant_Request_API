@@ -558,18 +558,30 @@ app.post("/search", async (req, res) => {
       }
     }
 
+    const formattedResults = finalResults.map((item, index) => ({
+      posicao: index + 1,
+      id: item.id,
+      score_final: item.score_final,
+      score_rrf: item.score_rrf,
+      scores: item.scores,
+      paths: item.paths,
+      in_both: item.in_both,
+      payload: item.payload,
+    }));
+
     res.setHeader("Content-Type", "application/json; charset=utf-8");
 
     if (debugMode && out.debug) {
       out.debug.filter_sent = qdrantFilter;
+      out.debug.weights_used = w;
       return res.json({
-        results: finalResults,
+        results: formattedResults,
         rerank: rerankInfo,
         debug: out.debug,
       });
     }
 
-    const response = { results: finalResults };
+    const response = { results: formattedResults };
     if (rerankInfo) response.rerank = rerankInfo;
     return res.json(response);
   } catch (err) {
