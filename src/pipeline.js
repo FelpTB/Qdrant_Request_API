@@ -147,6 +147,14 @@ export async function runPipeline(limit) {
 
       const points = chunk.map((item, i) => buildPoint(item, vectors[i] || {})).filter(Boolean);
 
+      if (points.length === 0 && chunk.length > 0) {
+        pipelineState.status = "failed";
+        pipelineState.finishedAt = Date.now();
+        pipelineState.upsert.lastError =
+          "Nenhum ponto com vetor denso após embeddings (buildPoint descartou todos). Verifique campos de texto no perfil ou logs do OpenAI.";
+        return;
+      }
+
       const t0Upsert = Date.now();
       const upsertResult = await upsertPointsBatch({
         collectionName: COLLECTION_NAME,

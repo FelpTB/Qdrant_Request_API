@@ -105,7 +105,7 @@ export function transformRow(row) {
 
   const produto = produtos.trim() || "";
   const servico = servicos.trim() || "";
-  const desc = descricao.trim() || "";
+  let desc = descricao.trim() || "";
   const pub = publico.trim() || "";
   const cliente = clientes.trim() || "";
 
@@ -116,7 +116,21 @@ export function transformRow(row) {
   if (pub) filledVectorKeys.push("publico");
   if (cliente) filledVectorKeys.push("cliente");
 
+  /**
+   * Sem nenhum dos cinco textos de oferta, não há embedding denso → buildPoint descarta o ponto e o upsert fica em 0.
+   * Quem passou em hasModeloNegocio costuma ter ao menos modelo_negocio: usamos fallback lexical para gerar v_descricao.
+   */
+  if (filledVectorKeys.length === 0 && modeloNegocio) {
+    const fallback = [modeloNegocio, nomeEmpresa, industria, cobertura].filter(Boolean).join(" ").trim();
+    if (fallback) {
+      desc = fallback;
+      filledVectorKeys.push("descricao");
+    }
+  }
+
   const bm25Text = [produto, servico, desc, pub, cliente].filter(Boolean).join(" ").trim() || " ";
+
+  payload.descricao = desc;
 
   return {
     cnpj: payload.cnpj,
