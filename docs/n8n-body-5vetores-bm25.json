@@ -1,0 +1,24 @@
+{
+  "vectors": {
+    "capacidades": [],
+    "produtos": [],
+    "clientes": [],
+    "descricao": [],
+    "servico": []
+  },
+  "weights": {
+    "capacidades": 0.2,
+    "produtos": 0.2,
+    "clientes": 0.2,
+    "descricao": 0.2,
+    "servico": 0.2
+  },
+  "limit_per_vector": 50,
+  "final_limit": 20,
+  "filter": {
+    "industria": "Construção Civil",
+    "modelo_negocio": "Prestador de Serviços"
+  },
+  "bm25_query": "sondagem percussiva mineração",
+  "bm25_weight": 0.3
+}

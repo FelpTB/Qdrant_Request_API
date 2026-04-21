@@ -38,9 +38,10 @@ export function getDashboardHtml() {
 
   <div class="card">
     <h2>Controles</h2>
+    <p style="margin:0 0 0.5rem;font-size:0.9rem;color:#aaa">Informe quantos perfis <strong>não vetorizados</strong> deseja processar nesta execução. O servidor lê o PostgreSQL em lotes (variável <code>PIPELINE_DB_QUERY_MAX</code>) até atingir o limite ou acabar a fila.</p>
     <div class="form-row">
       <label>Limite de registros:</label>
-      <input type="number" id="limit" value="100" min="1" max="50000" step="1">
+      <input type="number" id="limit" value="100" min="1" max="2000000" step="1">
       <button id="btnRun">Iniciar pipeline</button>
     </div>
     <div id="runError" class="error"></div>
@@ -49,6 +50,7 @@ export function getDashboardHtml() {
   <div class="card">
     <h2>Status</h2>
     <p>Status: <span id="status" class="status idle">idle</span></p>
+    <p>Meta desta execução: <strong id="goalLimit">—</strong> registros</p>
     <p>Tempo de processo: <strong id="time">—</strong></p>
   </div>
 
@@ -124,6 +126,9 @@ export function getDashboardHtml() {
 
     function render(state) {
       setStatus(state.status || 'idle');
+      const lim = state.limit;
+      document.getElementById('goalLimit').textContent =
+        lim != null && lim !== '' ? String(lim) : '—';
       const start = state.startedAt;
       const end = state.finishedAt || Date.now();
       if (start) {

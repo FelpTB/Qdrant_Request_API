@@ -1,5 +1,9 @@
 import { normalizeKeyword } from "./normalizeKeyword.js";
 
+function cnpjDigits(c) {
+  return String(c ?? "").replace(/\D/g, "");
+}
+
 /**
  * Normaliza valor para string (espelho do Code n8n).
  * @param {unknown} value
@@ -32,13 +36,16 @@ function clean(value) {
 }
 
 /**
- * Filtro: modelo_negocio não vazio (único critério para incluir).
- * Filtro: modelo_negocio não vazio (único critério para incluir).
- * Apenas os vetores cujos campos estão preenchidos são gerados e enviados ao Qdrant.
+ * Perfis totalmente vazios: sem CNPJ, sem nome e sem nenhum texto utilizável para embedding.
+ * Não usa mais modelo_negocio como obrigatório — só exclui o que não tem vetor/nome/dado algum.
  */
-function hasModeloNegocio(p) {
-  const v = p.modelo_negocio;
-  return v != null && String(v).trim() !== "";
+function isProfileCompletelyEmpty(item) {
+  if (item.filledVectorKeys?.length > 0) return false;
+  const p = item.payload;
+  if (cnpjDigits(p?.cnpj ?? item.cnpj).length > 0) return false;
+  const nome = String(p?.nome_empresa ?? "").trim();
+  if (nome) return false;
+  return true;
 }
 
 /**
@@ -117,13 +124,51 @@ export function transformRow(row) {
   if (cliente) filledVectorKeys.push("cliente");
 
   /**
-   * Sem nenhum dos cinco textos de oferta, não há embedding denso → buildPoint descarta o ponto e o upsert fica em 0.
-   * Quem passou em hasModeloNegocio costuma ter ao menos modelo_negocio: usamos fallback lexical para gerar v_descricao.
+   * Sem os cinco textos de oferta, montamos v_descricao com qualquer informação restante (nome, modelo, CNPJ, etc.).
    */
   if (filledVectorKeys.length === 0 && modeloNegocio) {
     const fallback = [modeloNegocio, nomeEmpresa, industria, cobertura].filter(Boolean).join(" ").trim();
     if (fallback) {
       desc = fallback;
+      filledVectorKeys.push("descricao");
+    }
+  }
+  if (filledVectorKeys.length === 0) {
+    const fallbackWide = [
+      nomeEmpresa,
+      modeloNegocio,
+      industria,
+      cobertura,
+      municipio,
+      uf,
+      produtos,
+      servicos,
+      desc,
+      pub,
+      cliente,
+      certificacoes,
+      premios,
+      parcerias,
+      estudosCaso,
+      site,
+      emails,
+      telefones,
+      endereco,
+      linkedin,
+      clean(identidade.cnpj) || row.cnpj,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    if (fallbackWide) {
+      desc = fallbackWide;
+      filledVectorKeys.push("descricao");
+    }
+  }
+  if (filledVectorKeys.length === 0) {
+    const cnpjOnly = String(clean(identidade.cnpj) || row.cnpj || "").trim();
+    if (cnpjOnly) {
+      desc = `Perfil CNPJ ${cnpjOnly}`;
       filledVectorKeys.push("descricao");
     }
   }
@@ -146,8 +191,7 @@ export function transformRow(row) {
 }
 
 /**
- * Aplica transformação a todas as linhas e filtra apenas por modelo_negocio.
- * Perfis com informações vazias são inseridos; apenas os vetores cujos campos estão preenchidos são gerados e enviados.
+ * Transforma todas as linhas e descarta só perfis totalmente vazios (sem CNPJ, nome e texto para vetor).
  *
  * @param {Array<object>} rows - resultado de fetchCompanyProfiles
  * @returns {{ items: Array<{ cnpj: string, produto: string, servico: string, descricao: string, publico: string, cliente: string, payload: object, bm25Text: string, filledVectorKeys: string[] }>, fetched: number, after_transform: number }}
@@ -157,8 +201,7 @@ export function transformAndFilter(rows) {
   const items = [];
   for (const row of rows) {
     const item = transformRow(row);
-    const p = item.payload;
-    if (!hasModeloNegocio(p)) continue;
+    if (isProfileCompletelyEmpty(item)) continue;
     items.push(item);
   }
   return { items, fetched, after_transform: items.length };

@@ -1,4 +1,4 @@
-import { fetchCompanyProfiles } from "./fetchCompanyProfiles.js";
+import { fetchCompanyProfiles, PIPELINE_DB_QUERY_MAX } from "./fetchCompanyProfiles.js";
 import { transformAndFilter } from "./transformProfile.js";
 import { generateEmbeddingsForItems } from "./embeddings.js";
 import { upsertPointsBatch } from "./upsertPoints.js";
@@ -16,6 +16,11 @@ const UPSERT_CONCURRENCY = Math.min(8, Math.max(1, parseInt(process.env.QDRANT_U
  * @param {string} cnpj
  * @returns {number}
  */
+/** Comparação linha ↔ item (formato do CNPJ pode variar). */
+function cnpjDigits(c) {
+  return String(c ?? "").replace(/\D/g, "");
+}
+
 function pointIdFromCnpj(cnpj) {
   const s = String(cnpj || "").trim();
   let h = 0;
@@ -106,74 +111,98 @@ export async function runPipeline(limit) {
   resetState(limit);
 
   try {
-    const t0Fetch = Date.now();
-    const rows = await fetchCompanyProfiles(limit);
-    pipelineState.fetch.total = rows.length;
-    pipelineState.fetch.success = rows.length;
-    pipelineState.fetch.duration_ms = Date.now() - t0Fetch;
+    let processedFromDb = 0;
 
-    const { items, fetched, after_transform } = transformAndFilter(rows);
-    pipelineState.transform.fetched = fetched;
-    pipelineState.transform.after_transform = after_transform;
+    while (processedFromDb < limit) {
+      const batchLimit = Math.min(PIPELINE_DB_QUERY_MAX, limit - processedFromDb);
+      const t0Fetch = Date.now();
+      const rows = await fetchCompanyProfiles(batchLimit);
+      pipelineState.fetch.duration_ms += Date.now() - t0Fetch;
 
-    if (items.length === 0) {
-      pipelineState.status = "completed";
-      pipelineState.finishedAt = Date.now();
-      return;
-    }
+      if (rows.length === 0) break;
 
-    const chunks = [];
-    for (let i = 0; i < items.length; i += PIPELINE_CHUNK_SIZE) {
-      chunks.push(items.slice(i, i + PIPELINE_CHUNK_SIZE));
-    }
+      pipelineState.fetch.total += rows.length;
+      pipelineState.fetch.success += rows.length;
 
-    for (let c = 0; c < chunks.length; c++) {
-      const chunk = chunks[c];
+      const { items, fetched, after_transform } = transformAndFilter(rows);
+      pipelineState.transform.fetched += fetched;
+      pipelineState.transform.after_transform += after_transform;
 
-      const t0Embed = Date.now();
-      const { vectors, errorCount, lastError } = await generateEmbeddingsForItems(chunk);
-      pipelineState.embed.duration_ms += Date.now() - t0Embed;
-      pipelineState.embed.batches += 1;
-      pipelineState.embed.total += chunk.length;
+      const itemCnpjSet = new Set(
+        items.map((i) => cnpjDigits(i.cnpj)).filter((s) => s.length > 0)
+      );
+      const skippedCnpjs = rows
+        .map((r) => r.cnpj)
+        .filter((c) => {
+          const k = cnpjDigits(c);
+          return k.length > 0 && !itemCnpjSet.has(k);
+        });
 
-      if (errorCount > 0) {
-        pipelineState.status = "failed";
-        pipelineState.finishedAt = Date.now();
-        pipelineState.embed.error += errorCount;
-        pipelineState.embed.lastError = lastError || "Erro na geração de embeddings";
-        return;
-      }
-      pipelineState.embed.success += chunk.length;
-
-      const points = chunk.map((item, i) => buildPoint(item, vectors[i] || {})).filter(Boolean);
-
-      if (points.length === 0 && chunk.length > 0) {
-        pipelineState.status = "failed";
-        pipelineState.finishedAt = Date.now();
-        pipelineState.upsert.lastError =
-          "Nenhum ponto com vetor denso após embeddings (buildPoint descartou todos). Verifique campos de texto no perfil ou logs do OpenAI.";
-        return;
+      if (skippedCnpjs.length > 0) {
+        const t0Skip = Date.now();
+        const skipMark = await markAsVectorized(skippedCnpjs);
+        pipelineState.mark.duration_ms += Date.now() - t0Skip;
+        pipelineState.mark.updated += skipMark.updated;
+        pipelineState.mark.chunks += skipMark.chunks;
       }
 
-      const t0Upsert = Date.now();
-      const upsertResult = await upsertPointsBatch({
-        collectionName: COLLECTION_NAME,
-        points,
-        batchSize: UPSERT_BATCH_SIZE,
-        wait: UPSERT_WAIT,
-        concurrency: UPSERT_CONCURRENCY,
-      });
-      pipelineState.upsert.duration_ms += Date.now() - t0Upsert;
-      pipelineState.upsert.total += points.length;
-      pipelineState.upsert.success += upsertResult.upserted;
-      pipelineState.upsert.batches += upsertResult.batches;
+      processedFromDb += rows.length;
 
-      const cnpjs = points.map((p) => p.payload?.cnpj).filter(Boolean);
-      const t0Mark = Date.now();
-      const markResult = await markAsVectorized(cnpjs);
-      pipelineState.mark.duration_ms += Date.now() - t0Mark;
-      pipelineState.mark.updated += markResult.updated;
-      pipelineState.mark.chunks += markResult.chunks;
+      if (items.length === 0) continue;
+
+      const chunks = [];
+      for (let i = 0; i < items.length; i += PIPELINE_CHUNK_SIZE) {
+        chunks.push(items.slice(i, i + PIPELINE_CHUNK_SIZE));
+      }
+
+      for (let c = 0; c < chunks.length; c++) {
+        const chunk = chunks[c];
+
+        const t0Embed = Date.now();
+        const { vectors, errorCount, lastError } = await generateEmbeddingsForItems(chunk);
+        pipelineState.embed.duration_ms += Date.now() - t0Embed;
+        pipelineState.embed.batches += 1;
+        pipelineState.embed.total += chunk.length;
+
+        if (errorCount > 0) {
+          pipelineState.status = "failed";
+          pipelineState.finishedAt = Date.now();
+          pipelineState.embed.error += errorCount;
+          pipelineState.embed.lastError = lastError || "Erro na geração de embeddings";
+          return;
+        }
+        pipelineState.embed.success += chunk.length;
+
+        const points = chunk.map((item, i) => buildPoint(item, vectors[i] || {})).filter(Boolean);
+
+        if (points.length === 0 && chunk.length > 0) {
+          pipelineState.status = "failed";
+          pipelineState.finishedAt = Date.now();
+          pipelineState.upsert.lastError =
+            "Nenhum ponto com vetor denso após embeddings (buildPoint descartou todos). Verifique campos de texto no perfil ou logs do OpenAI.";
+          return;
+        }
+
+        const t0Upsert = Date.now();
+        const upsertResult = await upsertPointsBatch({
+          collectionName: COLLECTION_NAME,
+          points,
+          batchSize: UPSERT_BATCH_SIZE,
+          wait: UPSERT_WAIT,
+          concurrency: UPSERT_CONCURRENCY,
+        });
+        pipelineState.upsert.duration_ms += Date.now() - t0Upsert;
+        pipelineState.upsert.total += points.length;
+        pipelineState.upsert.success += upsertResult.upserted;
+        pipelineState.upsert.batches += upsertResult.batches;
+
+        const cnpjs = points.map((p) => p.payload?.cnpj).filter(Boolean);
+        const t0Mark = Date.now();
+        const markResult = await markAsVectorized(cnpjs);
+        pipelineState.mark.duration_ms += Date.now() - t0Mark;
+        pipelineState.mark.updated += markResult.updated;
+        pipelineState.mark.chunks += markResult.chunks;
+      }
     }
 
     pipelineState.status = "completed";
@@ -181,6 +210,7 @@ export async function runPipeline(limit) {
   } catch (err) {
     pipelineState.status = "failed";
     pipelineState.finishedAt = Date.now();
+    if (!pipelineState.fetch.lastError) pipelineState.fetch.lastError = err.message;
     if (!pipelineState.embed.lastError) pipelineState.embed.lastError = err.message;
     if (!pipelineState.upsert.lastError) pipelineState.upsert.lastError = err.message;
     if (!pipelineState.mark.lastError) pipelineState.mark.lastError = err.message;
