@@ -2,7 +2,7 @@ import express from "express";
 import { multiVectorSearch } from "./multiVectorSearch.js";
 import { llmRerank } from "./llmRerank.js";
 import qdrantClient from "./qdrantClient.js";
-import { normalizePointsInput, upsertPointsBatch } from "./upsertPoints.js";
+import { normalizePointsInput, normalizeSinglePointInput, upsertPointsBatch } from "./upsertPoints.js";
 import { markAsVectorized } from "./markVectorized.js";
 import { isDbConfigured } from "./db.js";
 import { logSuccess, logError } from "./logger.js";
@@ -15,6 +15,7 @@ const app = express();
 const COLLECTION_NAME = process.env.COLLECTION_NAME;
 
 const ENDPOINT_UPSERT = "POST /points/upsert";
+const ENDPOINT_INSERT_POINT = "POST /points/insert";
 const ENDPOINT_MARK_VECTORIZED = "POST /company-profiles/mark-vectorized";
 
 /** POST /points/upsert usa body grande (lista de pontos); parser próprio antes do global. */
@@ -62,6 +63,48 @@ app.post(
         collection: COLLECTION_NAME,
         batch_index: err.batchIndex,
         total_batches: err.totalBatches,
+        status,
+        qdrant_error: err.data?.status?.error,
+      });
+      return res.status(status).json({ error: message });
+    }
+  }
+);
+
+/** Inserção de um único ponto em coleção informada no body (não usa COLLECTION_NAME do env). */
+app.post(
+  "/points/insert",
+  express.json({ limit: process.env.UPSERT_BODY_LIMIT || "50mb" }),
+  async (req, res) => {
+    const normalized = normalizeSinglePointInput(req.body);
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
+    }
+    const { collection, point } = normalized;
+    const start = Date.now();
+    try {
+      const result = await upsertPointsBatch({
+        collectionName: collection,
+        points: [point],
+        batchSize: 1,
+        wait: true,
+        concurrency: 1,
+      });
+      logSuccess(ENDPOINT_INSERT_POINT, "Ponto inserido no Qdrant", {
+        collection,
+        point_id: point.id,
+        upserted: result.upserted,
+        duration_ms: Date.now() - start,
+      });
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      return res.json({ ok: true, collection, ...result });
+    } catch (err) {
+      const status = err.status ?? err.statusCode ?? 500;
+      const qdrantMsg = status === 400 && err.data?.status?.error ? err.data.status.error : null;
+      const message = qdrantMsg || `Falha na inserção no Qdrant: ${err.message || "Erro desconhecido"}`;
+      logError(ENDPOINT_INSERT_POINT, "Inserção de ponto no Qdrant falhou", err, {
+        collection,
+        point_id: point.id,
         status,
         qdrant_error: err.data?.status?.error,
       });

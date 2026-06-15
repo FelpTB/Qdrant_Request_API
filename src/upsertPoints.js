@@ -51,6 +51,40 @@ export function normalizePointsInput(body) {
 }
 
 /**
+ * Valida body de inserção de um único ponto em coleção informada no request.
+ *
+ * @param {unknown} body
+ * @returns {{ collection: string, point: { id: number|string, payload: object, vectors: object }, error?: string }}
+ */
+export function normalizeSinglePointInput(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "Body deve ser um objeto JSON com 'collection' e 'point'" };
+  }
+
+  const collection = typeof body.collection === "string" ? body.collection.trim() : "";
+  if (!collection) {
+    return { error: "Campo 'collection' é obrigatório (nome da coleção destino)" };
+  }
+
+  const { point } = body;
+  if (!point || typeof point !== "object" || Array.isArray(point)) {
+    return { error: "Campo 'point' é obrigatório (objeto com id, payload e vectors)" };
+  }
+  if (!("id" in point) || !("vectors" in point)) {
+    return { error: "Campo 'point' deve conter id e vectors" };
+  }
+
+  return {
+    collection,
+    point: {
+      id: point.id,
+      payload: point.payload && typeof point.payload === "object" ? point.payload : {},
+      vectors: point.vectors && typeof point.vectors === "object" ? point.vectors : {},
+    },
+  };
+}
+
+/**
  * Insere pontos na coleção Qdrant em lotes.
  * Suporta concorrência limitada (várias requisições em paralelo) e wait=false para maior throughput.
  *

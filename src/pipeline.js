@@ -4,6 +4,7 @@ import { generateEmbeddingsForItems } from "./embeddings.js";
 import { upsertPointsBatch } from "./upsertPoints.js";
 import { markAsVectorized } from "./markVectorized.js";
 import { getPool } from "./db.js";
+import { pointIdFromCnpj } from "./pointIdFromCnpj.js";
 
 const COLLECTION_NAME = process.env.COLLECTION_NAME;
 const PIPELINE_CHUNK_SIZE = Math.min(1000, Math.max(50, parseInt(process.env.PIPELINE_CHUNK_SIZE, 10) || 200));
@@ -11,23 +12,9 @@ const UPSERT_BATCH_SIZE = Math.min(1000, Math.max(1, parseInt(process.env.UPSERT
 const UPSERT_WAIT = process.env.QDRANT_UPSERT_WAIT === "true";
 const UPSERT_CONCURRENCY = Math.min(8, Math.max(1, parseInt(process.env.QDRANT_UPSERT_CONCURRENCY, 10) || 3));
 
-/**
- * Gera id numérico estável a partir do CNPJ (idempotência no Qdrant).
- * @param {string} cnpj
- * @returns {number}
- */
 /** Comparação linha ↔ item (formato do CNPJ pode variar). */
 function cnpjDigits(c) {
   return String(c ?? "").replace(/\D/g, "");
-}
-
-function pointIdFromCnpj(cnpj) {
-  const s = String(cnpj || "").trim();
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h) || 1;
 }
 
 /**

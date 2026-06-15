@@ -6,6 +6,9 @@ node_modules/
 .env.local
 .env.*.local
 
+# Scripts (listas CNPJ geradas)
+scripts/out/
+
 # Logs e cache
 npm-debug.log*
 .npm

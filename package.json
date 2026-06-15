@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test tests/transformProfile.test.js"
+    "test": "node --test tests/transformProfile.test.js",
+    "purge:qdrant-sem-nome": "node scripts/purgeQdrantSemNomeEmpresa.mjs",
+    "study:profile-chunks": "node scripts/profileChunkQualityStudy.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
