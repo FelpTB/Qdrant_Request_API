@@ -20,15 +20,17 @@ function getClient() {
 /**
  * Chama a API de embeddings para um array de textos.
  * @param {string[]} texts
+ * @param {number} [dimensions] - dimensões do vetor (ex.: 512 para text-embedding-3-small)
  * @returns {Promise<number[][]>}
  */
-async function embedBatch(texts) {
+async function embedBatch(texts, dimensions) {
   if (texts.length === 0) return [];
   const openai = getClient();
-  const response = await openai.embeddings.create({
-    model: MODEL,
-    input: texts,
-  });
+  const request = { model: MODEL, input: texts };
+  if (Number.isInteger(dimensions) && dimensions > 0) {
+    request.dimensions = dimensions;
+  }
+  const response = await openai.embeddings.create(request);
   const order = response.data
     .filter((d) => d.embedding != null)
     .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
@@ -38,14 +40,15 @@ async function embedBatch(texts) {
 /**
  * Gera embedding de um único texto (ex.: query de busca).
  * @param {string} text
+ * @param {number} [dimensions]
  * @returns {Promise<number[]>}
  */
-export async function embedQueryText(text) {
+export async function embedQueryText(text, dimensions) {
   const trimmed = String(text ?? "").trim();
   if (!trimmed) {
     throw new Error("Texto da query vazio");
   }
-  const [embedding] = await embedBatch([trimmed]);
+  const [embedding] = await embedBatch([trimmed], dimensions);
   if (!embedding || embedding.length === 0) {
     throw new Error("OpenAI não retornou embedding para a query");
   }

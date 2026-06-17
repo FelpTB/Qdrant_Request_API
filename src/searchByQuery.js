@@ -55,6 +55,7 @@ export async function searchSingleVector({
  * @param {string} params.query
  * @param {string} [params.vectorName]
  * @param {number} [params.limit=20]
+ * @param {number} [params.embedDimensions]
  * @param {object|null} [params.filter]
  */
 export async function searchByTextQuery({
@@ -62,9 +63,10 @@ export async function searchByTextQuery({
   query,
   vectorName,
   limit = 20,
+  embedDimensions,
   filter = null,
 }) {
-  const embedding = await embedQueryText(query);
+  const embedding = await embedQueryText(query, embedDimensions);
   const results = await searchSingleVector({
     collectionName,
     embedding,

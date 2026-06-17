@@ -118,6 +118,7 @@ app.post(
   }
 );
 
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "2mb" }));
 
 /** Marca perfis como vetorizados no PostgreSQL (qdrant = true) por lista de CNPJ. Resposta síncrona ao fim da atualização. */
@@ -710,6 +711,22 @@ function buildEqualWeights(dimensionKeys, includeBm25 = false) {
   return weights;
 }
 
+/** Dimensões do embedding OpenAI por coleção (whatsapp_bf usa 512d por padrão). */
+function getEmbedDimensionsForCollection(collection, body) {
+  if (body?.embed_dimensions != null) {
+    const n = Number(body.embed_dimensions);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  if (collection === "whatsapp_bf") {
+    const n = Number(process.env.WHATSAPP_BF_EMBED_DIMENSIONS);
+    if (Number.isInteger(n) && n > 0) return n;
+    return 512;
+  }
+  const global = Number(process.env.OPENAI_EMBED_DIMENSIONS);
+  if (Number.isInteger(global) && global > 0) return global;
+  return undefined;
+}
+
 /**
  * Busca por texto: vetoriza a query com OpenAI e consulta a coleção informada.
  * Modo single (ex.: whatsapp_bf): vetor default sem nome; opcional WHATSAPP_BF_VECTOR_NAME ou body.vector_name.
@@ -744,6 +761,7 @@ app.post("/search/query", async (req, res) => {
   const qdrantFilter = mergeQdrantFilter(qdrantFilterPositive, qdrantFilterNegative);
 
   const config = resolveQuerySearchConfig(collection, req.body);
+  const embedDimensions = getEmbedDimensionsForCollection(collection, req.body);
   const start = Date.now();
 
   try {
@@ -753,6 +771,7 @@ app.post("/search/query", async (req, res) => {
         query,
         vectorName: config.vectorName || undefined,
         limit: finalLimit,
+        embedDimensions,
         filter: qdrantFilter,
       });
 
@@ -775,7 +794,7 @@ app.post("/search/query", async (req, res) => {
       });
     }
 
-    const embedding = await embedQueryText(query);
+    const embedding = await embedQueryText(query, embedDimensions);
     const dimensionKeys = config.profile?.dimension_keys ?? getDimensionKeys();
     const vectors = {};
     for (const dim of dimensionKeys) vectors[dim] = embedding;
@@ -809,7 +828,8 @@ app.post("/search/query", async (req, res) => {
     return handleSearch(searchReq, res, collection, ENDPOINT_SEARCH_QUERY, true);
   } catch (err) {
     const status = err.status ?? err.statusCode ?? 500;
-    const message = err.message || "Falha ao vetorizar query ou buscar no Qdrant";
+    const qdrantMsg = err.data?.status?.error;
+    const message = qdrantMsg || err.message || "Falha ao vetorizar query ou buscar no Qdrant";
     logError(ENDPOINT_SEARCH_QUERY, "Busca por query falhou", err, {
       collection,
       status,
