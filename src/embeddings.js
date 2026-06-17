@@ -35,6 +35,23 @@ async function embedBatch(texts) {
   return order.map((d) => d.embedding);
 }
 
+/**
+ * Gera embedding de um único texto (ex.: query de busca).
+ * @param {string} text
+ * @returns {Promise<number[]>}
+ */
+export async function embedQueryText(text) {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) {
+    throw new Error("Texto da query vazio");
+  }
+  const [embedding] = await embedBatch([trimmed]);
+  if (!embedding || embedding.length === 0) {
+    throw new Error("OpenAI não retornou embedding para a query");
+  }
+  return embedding;
+}
+
 const VECTOR_KEYS = ["produto", "servico", "descricao", "publico", "cliente"];
 const VECTOR_KEY_TO_NAMED = {
   produto: "v_produto",

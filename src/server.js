@@ -9,6 +9,8 @@ import { logSuccess, logError } from "./logger.js";
 import { getPipelineState, runPipeline } from "./pipeline.js";
 import { getDashboardHtml } from "./dashboardHtml.js";
 import { normalizeKeyword } from "./normalizeKeyword.js";
+import { embedQueryText } from "./embeddings.js";
+import { searchByTextQuery } from "./searchByQuery.js";
 import "dotenv/config";
 
 const app = express();
@@ -16,6 +18,9 @@ const COLLECTION_NAME = process.env.COLLECTION_NAME;
 
 const ENDPOINT_UPSERT = "POST /points/upsert";
 const ENDPOINT_INSERT_POINT = "POST /points/insert";
+const ENDPOINT_SEARCH = "POST /search";
+const ENDPOINT_SEARCH_COLLECTION = "POST /search/collection";
+const ENDPOINT_SEARCH_QUERY = "POST /search/query";
 const ENDPOINT_MARK_VECTORIZED = "POST /company-profiles/mark-vectorized";
 
 /** POST /points/upsert usa body grande (lista de pontos); parser próprio antes do global. */
@@ -527,16 +532,7 @@ function validateSearchBody(body) {
   return null;
 }
 
-app.post("/search", async (req, res) => {
-  const validationError = validateSearchBody(req.body);
-  if (validationError) {
-    return res.status(validationError.status).json({ error: validationError.message });
-  }
-
-  if (!COLLECTION_NAME) {
-    return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
-  }
-
+async function handleSearch(req, res, collectionName, endpointLabel, includeCollectionInResponse = false) {
   const { vectors, weights, limit_per_vector, final_limit, filter, filter_not, bm25_query, query_text } = req.body;
   const dimensionKeys = getDimensionKeys();
   const useBm25 = bm25_query != null && bm25_query !== "";
@@ -560,7 +556,7 @@ app.post("/search", async (req, res) => {
       vectorNamesMap: getVectorNamesMap(),
       limitPerVector: limit_per_vector,
       finalLimit: final_limit,
-      collectionName: COLLECTION_NAME,
+      collectionName,
       filter: qdrantFilter,
       filterNotPredicates,
       bm25Query: typeof bm25_query === "string" ? bm25_query : null,
@@ -618,13 +614,17 @@ app.post("/search", async (req, res) => {
       out.debug.filter_sent = qdrantFilter;
       out.debug.weights_used = w;
       return res.json({
+        ...(includeCollectionInResponse ? { collection: collectionName } : {}),
         results: formattedResults,
         rerank: rerankInfo,
         debug: out.debug,
       });
     }
 
-    const response = { results: formattedResults };
+    const response = {
+      ...(includeCollectionInResponse ? { collection: collectionName } : {}),
+      results: formattedResults,
+    };
     if (rerankInfo) response.rerank = rerankInfo;
     return res.json(response);
   } catch (err) {
@@ -633,8 +633,190 @@ app.post("/search", async (req, res) => {
       status === 400 && err.data?.status?.error
         ? err.data.status.error
         : "Erro no banco vetorial (busca Qdrant)";
-    logError("POST /search", "Busca vetorial falhou", err, {
-      collection: COLLECTION_NAME,
+    logError(endpointLabel, "Busca vetorial falhou", err, {
+      collection: collectionName,
+      status,
+      qdrant_error: err.data?.status?.error,
+    });
+    return res.status(status).json({ error: message });
+  }
+}
+
+app.post("/search", async (req, res) => {
+  const validationError = validateSearchBody(req.body);
+  if (validationError) {
+    return res.status(validationError.status).json({ error: validationError.message });
+  }
+
+  if (!COLLECTION_NAME) {
+    return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
+  }
+
+  return handleSearch(req, res, COLLECTION_NAME, ENDPOINT_SEARCH);
+});
+
+/** Busca vetorial em coleção informada no body (não usa COLLECTION_NAME do env). */
+app.post("/search/collection", async (req, res) => {
+  const collection = typeof req.body?.collection === "string" ? req.body.collection.trim() : "";
+  if (!collection) {
+    return res.status(400).json({ error: "Campo 'collection' é obrigatório (nome da coleção a buscar)" });
+  }
+
+  const validationError = validateSearchBody(req.body);
+  if (validationError) {
+    return res.status(validationError.status).json({ error: validationError.message });
+  }
+
+  return handleSearch(req, res, collection, ENDPOINT_SEARCH_COLLECTION, true);
+});
+
+function getSearchCollectionProfile(collection) {
+  const env = process.env.SEARCH_COLLECTION_PROFILES;
+  if (!env || typeof env !== "string") return null;
+  try {
+    const profiles = JSON.parse(env);
+    return profiles && typeof profiles === "object" ? profiles[collection] ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Define se a busca por texto usa vetor único ou multi-vetor (mesmo embedding replicado). */
+function resolveQuerySearchConfig(collection, body) {
+  if (typeof body?.vector_name === "string" && body.vector_name.trim()) {
+    return { mode: "single", vectorName: body.vector_name.trim() };
+  }
+
+  if (collection === "whatsapp_bf") {
+    const vectorName = process.env.WHATSAPP_BF_VECTOR_NAME?.trim();
+    if (vectorName) return { mode: "single", vectorName };
+  }
+
+  const profile = getSearchCollectionProfile(collection);
+  if (profile?.mode === "single" && profile.vector_name) {
+    return { mode: "single", vectorName: String(profile.vector_name).trim() };
+  }
+
+  return { mode: "multi", profile };
+}
+
+function buildEqualWeights(dimensionKeys, includeBm25 = false) {
+  const n = dimensionKeys.length + (includeBm25 ? 1 : 0);
+  const w = 1 / n;
+  const weights = {};
+  for (const dim of dimensionKeys) weights[dim] = w;
+  if (includeBm25) weights.bm25 = w;
+  return weights;
+}
+
+/**
+ * Busca por texto: vetoriza a query com OpenAI e consulta a coleção informada.
+ * Modo single (ex.: whatsapp_bf): WHATSAPP_BF_VECTOR_NAME ou body.vector_name.
+ * Modo multi: replica o embedding em todas as dimensões configuradas (QDRANT_DIMENSION_KEYS).
+ */
+app.post("/search/query", async (req, res) => {
+  const collection = typeof req.body?.collection === "string" ? req.body.collection.trim() : "";
+  const query = typeof req.body?.query === "string" ? req.body.query.trim() : "";
+
+  if (!collection) {
+    return res.status(400).json({ error: "Campo 'collection' é obrigatório (nome da coleção a buscar)" });
+  }
+  if (!query) {
+    return res.status(400).json({ error: "Campo 'query' é obrigatório (texto a buscar)" });
+  }
+  if (!process.env.OPENAI_API_KEY?.trim()) {
+    return res.status(503).json({
+      error: "OPENAI_API_KEY não configurado; necessário para vetorizar a query",
+    });
+  }
+
+  const finalLimit = Number(req.body.final_limit) || 20;
+  if (!Number.isInteger(finalLimit) || finalLimit < 1) {
+    return res.status(400).json({ error: "final_limit deve ser um inteiro >= 1" });
+  }
+
+  const keywordKeys = getAllowedPayloadKeys();
+  const fullTextKeys = getFullTextPayloadKeys();
+  const { filter, filter_not } = req.body;
+  const qdrantFilterPositive = buildQdrantFilter(filter, keywordKeys, fullTextKeys);
+  const qdrantFilterNegative = buildQdrantFilterNot(filter_not, keywordKeys, fullTextKeys);
+  const qdrantFilter = mergeQdrantFilter(qdrantFilterPositive, qdrantFilterNegative);
+
+  const config = resolveQuerySearchConfig(collection, req.body);
+  const start = Date.now();
+
+  try {
+    if (config.mode === "single") {
+      if (!config.vectorName) {
+        return res.status(400).json({
+          error: "Informe 'vector_name' no body ou configure WHATSAPP_BF_VECTOR_NAME no ambiente para a coleção whatsapp_bf",
+        });
+      }
+
+      const { results, embedding_dims } = await searchByTextQuery({
+        collectionName: collection,
+        query,
+        vectorName: config.vectorName,
+        limit: finalLimit,
+        filter: qdrantFilter,
+      });
+
+      logSuccess(ENDPOINT_SEARCH_QUERY, "Busca por query vetorizada concluída", {
+        collection,
+        mode: "single",
+        vector_name: config.vectorName,
+        results: results.length,
+        embedding_dims,
+        duration_ms: Date.now() - start,
+      });
+
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      return res.json({
+        collection,
+        query,
+        mode: "single",
+        vector_name: config.vectorName,
+        results,
+      });
+    }
+
+    const embedding = await embedQueryText(query);
+    const dimensionKeys = config.profile?.dimension_keys ?? getDimensionKeys();
+    const vectors = {};
+    for (const dim of dimensionKeys) vectors[dim] = embedding;
+
+    const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim();
+    const useBm25 = req.body.bm25 !== false && Boolean(bm25VectorName);
+    const bm25_query = typeof req.body.bm25_query === "string" ? req.body.bm25_query.trim() : query;
+    const weights = req.body.weights
+      ?? config.profile?.weights
+      ?? buildEqualWeights(dimensionKeys, useBm25);
+
+    const searchReq = {
+      ...req,
+      body: {
+        ...req.body,
+        vectors,
+        weights,
+        limit_per_vector: req.body.limit_per_vector ?? 50,
+        final_limit: finalLimit,
+        bm25_query: useBm25 ? bm25_query : undefined,
+        filter,
+        filter_not,
+      },
+    };
+
+    const validationError = validateSearchBody(searchReq.body);
+    if (validationError) {
+      return res.status(validationError.status).json({ error: validationError.message });
+    }
+
+    return handleSearch(searchReq, res, collection, ENDPOINT_SEARCH_QUERY, true);
+  } catch (err) {
+    const status = err.status ?? err.statusCode ?? 500;
+    const message = err.message || "Falha ao vetorizar query ou buscar no Qdrant";
+    logError(ENDPOINT_SEARCH_QUERY, "Busca por query falhou", err, {
+      collection,
       status,
       qdrant_error: err.data?.status?.error,
     });
