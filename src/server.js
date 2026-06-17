@@ -688,13 +688,14 @@ function resolveQuerySearchConfig(collection, body) {
   }
 
   if (collection === "whatsapp_bf") {
-    const vectorName = process.env.WHATSAPP_BF_VECTOR_NAME?.trim();
-    if (vectorName) return { mode: "single", vectorName };
+    const vectorName = process.env.WHATSAPP_BF_VECTOR_NAME?.trim() || null;
+    return { mode: "single", vectorName };
   }
 
   const profile = getSearchCollectionProfile(collection);
-  if (profile?.mode === "single" && profile.vector_name) {
-    return { mode: "single", vectorName: String(profile.vector_name).trim() };
+  if (profile?.mode === "single") {
+    const vectorName = profile.vector_name ? String(profile.vector_name).trim() : null;
+    return { mode: "single", vectorName: vectorName || null };
   }
 
   return { mode: "multi", profile };
@@ -711,7 +712,7 @@ function buildEqualWeights(dimensionKeys, includeBm25 = false) {
 
 /**
  * Busca por texto: vetoriza a query com OpenAI e consulta a coleção informada.
- * Modo single (ex.: whatsapp_bf): WHATSAPP_BF_VECTOR_NAME ou body.vector_name.
+ * Modo single (ex.: whatsapp_bf): vetor default sem nome; opcional WHATSAPP_BF_VECTOR_NAME ou body.vector_name.
  * Modo multi: replica o embedding em todas as dimensões configuradas (QDRANT_DIMENSION_KEYS).
  */
 app.post("/search/query", async (req, res) => {
@@ -747,16 +748,10 @@ app.post("/search/query", async (req, res) => {
 
   try {
     if (config.mode === "single") {
-      if (!config.vectorName) {
-        return res.status(400).json({
-          error: "Informe 'vector_name' no body ou configure WHATSAPP_BF_VECTOR_NAME no ambiente para a coleção whatsapp_bf",
-        });
-      }
-
       const { results, embedding_dims } = await searchByTextQuery({
         collectionName: collection,
         query,
-        vectorName: config.vectorName,
+        vectorName: config.vectorName || undefined,
         limit: finalLimit,
         filter: qdrantFilter,
       });
@@ -775,7 +770,7 @@ app.post("/search/query", async (req, res) => {
         collection,
         query,
         mode: "single",
-        vector_name: config.vectorName,
+        vector_name: config.vectorName ?? null,
         results,
       });
     }
