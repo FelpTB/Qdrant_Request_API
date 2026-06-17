@@ -711,7 +711,7 @@ function buildEqualWeights(dimensionKeys, includeBm25 = false) {
   return weights;
 }
 
-/** Dimensões do embedding OpenAI por coleção (whatsapp_bf usa 512d por padrão). */
+/** Dimensões do embedding OpenAI por coleção (whatsapp_bf: text-embedding-3-small, 1536d). */
 function getEmbedDimensionsForCollection(collection, body) {
   if (body?.embed_dimensions != null) {
     const n = Number(body.embed_dimensions);
@@ -720,7 +720,7 @@ function getEmbedDimensionsForCollection(collection, body) {
   if (collection === "whatsapp_bf") {
     const n = Number(process.env.WHATSAPP_BF_EMBED_DIMENSIONS);
     if (Number.isInteger(n) && n > 0) return n;
-    return 512;
+    return 1536;
   }
   const global = Number(process.env.OPENAI_EMBED_DIMENSIONS);
   if (Number.isInteger(global) && global > 0) return global;
