@@ -191,6 +191,53 @@ Com `?debug=1`: a resposta inclui objeto `debug` (ex.: `points_per_dimension`, `
 
 ---
 
+### POST `/search/text`
+
+Busca por **texto**: a API gera o embedding com OpenAI (`text-embedding-3-small`) e executa o mesmo pipeline de `POST /search` na coleção padrão (`COLLECTION_NAME`). Ideal para agentes / n8n (não precisa enviar vetores).
+
+Requer `OPENAI_API_KEY`.
+
+**Body (JSON):**
+
+```json
+{
+  "query": "energia solar fotovoltaica",
+  "weights": {
+    "produto": 0.3,
+    "servico": 0.2,
+    "descricao": 0.15,
+    "publico": 0.1,
+    "cliente": 0.05,
+    "bm25": 0.2
+  },
+  "limit_per_vector": 50,
+  "final_limit": 20,
+  "filter": { "uf": "SP" },
+  "filter_not": { "descricao": "combustível" },
+  "bm25_query": "energia solar painel",
+  "rerank": true
+}
+```
+
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| **query** | Sim | Texto a vetorizar e buscar. |
+| **queries** | Não | Objeto opcional com texto por dimensão (`produto`, `servico`, …). Dimensões omitidas usam `query`. |
+| **weights** | Não | Pesos por dimensão (+ `bm25` se BM25 ativo). Se omitido, pesos iguais (soma 1.0). |
+| **limit_per_vector** | Não | Default `50`. |
+| **final_limit** | Não | Default `20`. |
+| **filter** / **filter_not** | Não | Mesma semântica de `POST /search`. Aceita objeto ou string JSON. |
+| **bm25_query** | Não | Termos BM25. Se omitido e BM25 estiver configurado, usa `query`. Envie `bm25: false` para desligar. |
+| **rerank** | Não | `true` (ou `?rerank=1`) ativa reordenação LLM. |
+| **query_text** | Não | Texto usado no rerank; default = `query`. |
+| **embed_dimensions** | Não | Dimensões do embedding OpenAI (se a coleção usar dim reduzida). |
+
+**Resposta (200):** igual a `POST /search`, com campos extras `query`, `mode: "text"`, `embedding_model`, `embedding_dims`, `query_texts`.
+
+**Erros:** `400` (query ausente / body inválido), `503` (`OPENAI_API_KEY` ausente), `500` (falha OpenAI/Qdrant).
+
+---
+
 ### POST `/search/validate-filter`
 
 Testa o filtro **sem** busca vetorial: faz scroll no Qdrant com o filtro mesclado (filter + filter_not) e retorna quantos pontos batem e uma amostra de payloads. Útil para debugar filtros.
@@ -256,11 +303,12 @@ Requisitos: `DB_URL`, `COLLECTION_NAME`, `OPENAI_API_KEY`, variáveis do Qdrant.
 
 ## Uso no n8n
 
-1. **HTTP Request** — Método `POST`, URL `https://SUA-URL-RAILWAY.up.railway.app/search`, Body Content Type `JSON`, body com `vectors`, `weights`, `limit_per_vector`, `final_limit` e opcionalmente `filter`, `filter_not`, `bm25_query`.
-2. As chaves de `vectors` e `weights` devem ser exatamente as retornadas em **GET `/config`** em `dimension_keys` (e `bm25` em weights se usar BM25).
-3. Para filtros, use chaves de `payload_keys` (keyword) e/ou `payload_keys_full_text` (full-text). Ex.: `filter: { uf: "SP", descricao: "energia solar" }`.
-4. **GET `/config`** — para listar dimension_keys, payload_keys, payload_keys_full_text e vector_names.
-5. **GET `/health`** — para verificar se a API está no ar.
+1. **HTTP Request (agente / texto)** — Método `POST`, URL `https://SUA-URL-RAILWAY.up.railway.app/search/text?rerank=1`, Body JSON com `query` e opcionalmente `weights`, `filter`, `filter_not`, `bm25_query`, `limit_per_vector`, `final_limit`. A API vetoriza com OpenAI.
+2. **HTTP Request (vetores prontos)** — Método `POST`, URL `.../search`, Body JSON com `vectors`, `weights`, `limit_per_vector`, `final_limit` e opcionalmente `filter`, `filter_not`, `bm25_query`.
+3. As chaves de `vectors` e `weights` devem ser exatamente as retornadas em **GET `/config`** em `dimension_keys` (e `bm25` em weights se usar BM25).
+4. Para filtros, use chaves de `payload_keys` (keyword) e/ou `payload_keys_full_text` (full-text). Ex.: `filter: { uf: "SP", descricao: "energia solar" }`.
+5. **GET `/config`** — para listar dimension_keys, payload_keys, payload_keys_full_text e vector_names.
+6. **GET `/health`** — para verificar se a API está no ar.
 
 ---
 
@@ -279,7 +327,7 @@ API sobe em `http://0.0.0.0:3000` (ou `PORT`/`HOST` definidos no `.env`).
 
 ```
 src/
-  server.js              # Express: /search, /search/validate-filter, /config, /health, /points/upsert, /company-profiles/mark-vectorized, /pipeline/*
+  server.js              # Express: /search, /search/text, /search/validate-filter, /config, /health, /points/upsert, /company-profiles/mark-vectorized, /pipeline/*
   qdrantClient.js        # Cliente Qdrant Cloud
   multiVectorSearch.js   # Busca por vetores nomeados, fusão, BM25, remoção score 0 servico/produto
   upsertPoints.js        # Normalização e upsert em batch

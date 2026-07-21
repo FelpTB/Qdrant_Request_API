@@ -21,6 +21,7 @@ const ENDPOINT_INSERT_POINT = "POST /points/insert";
 const ENDPOINT_SEARCH = "POST /search";
 const ENDPOINT_SEARCH_COLLECTION = "POST /search/collection";
 const ENDPOINT_SEARCH_QUERY = "POST /search/query";
+const ENDPOINT_SEARCH_TEXT = "POST /search/text";
 const ENDPOINT_MARK_VECTORIZED = "POST /company-profiles/mark-vectorized";
 
 /** POST /points/upsert usa body grande (lista de pontos); parser próprio antes do global. */
@@ -654,6 +655,203 @@ app.post("/search", async (req, res) => {
   }
 
   return handleSearch(req, res, COLLECTION_NAME, ENDPOINT_SEARCH);
+});
+
+/**
+ * Aceita objeto ou string JSON (útil para tools n8n / form-urlencoded).
+ * @returns {{ value?: object, error?: { status: number, message: string } }}
+ */
+function coerceJsonObjectField(raw, fieldName, { allowEmpty = true } = {}) {
+  if (raw == null || raw === "") {
+    return allowEmpty ? { value: undefined } : { error: { status: 400, message: `Campo '${fieldName}' é obrigatório` } };
+  }
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    return { value: raw };
+  }
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { value: parsed };
+      }
+      return { error: { status: 400, message: `Campo '${fieldName}' deve ser um objeto JSON` } };
+    } catch {
+      return { error: { status: 400, message: `Campo '${fieldName}' não é um JSON válido` } };
+    }
+  }
+  return { error: { status: 400, message: `Campo '${fieldName}' deve ser um objeto` } };
+}
+
+/**
+ * Vetoriza textos por dimensão com OpenAI.
+ * - query: texto padrão replicado em todas as dimensões
+ * - queries: opcional, sobrescreve o texto de dimensões específicas
+ */
+async function buildVectorsFromQueryText({ query, queries, dimensionKeys, embedDimensions }) {
+  const perDimText = {};
+  const uniqueTexts = new Map();
+
+  for (const dim of dimensionKeys) {
+    const override =
+      queries && typeof queries[dim] === "string" && queries[dim].trim()
+        ? queries[dim].trim()
+        : null;
+    const text = override || query;
+    perDimText[dim] = text;
+    if (!uniqueTexts.has(text)) uniqueTexts.set(text, null);
+  }
+
+  for (const text of uniqueTexts.keys()) {
+    uniqueTexts.set(text, await embedQueryText(text, embedDimensions));
+  }
+
+  const vectors = {};
+  for (const dim of dimensionKeys) {
+    vectors[dim] = uniqueTexts.get(perDimText[dim]);
+  }
+  return { vectors, perDimText, embedding_dims: vectors[dimensionKeys[0]]?.length ?? 0 };
+}
+
+/**
+ * Busca por texto na coleção padrão (COLLECTION_NAME):
+ * vetoriza a query com OpenAI e executa o mesmo pipeline de POST /search.
+ *
+ * Body:
+ * - query (string, obrigatório) — texto a vetorizar
+ * - queries (objeto opcional) — texto por dimensão (produto, servico, ...)
+ * - weights, filter, filter_not, limit_per_vector, final_limit, bm25_query, bm25, rerank, query_text, embed_dimensions
+ */
+app.post("/search/text", async (req, res) => {
+  if (!COLLECTION_NAME) {
+    return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
+  }
+  if (!process.env.OPENAI_API_KEY?.trim()) {
+    return res.status(503).json({
+      error: "OPENAI_API_KEY não configurado; necessário para vetorizar a query",
+    });
+  }
+
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const query = typeof body.query === "string" ? body.query.trim() : "";
+  if (!query) {
+    return res.status(400).json({ error: "Campo 'query' é obrigatório (texto a buscar/vetorizar)" });
+  }
+
+  const queriesCoerced = coerceJsonObjectField(body.queries, "queries");
+  if (queriesCoerced.error) {
+    return res.status(queriesCoerced.error.status).json({ error: queriesCoerced.error.message });
+  }
+  const weightsCoerced = coerceJsonObjectField(body.weights, "weights");
+  if (weightsCoerced.error) {
+    return res.status(weightsCoerced.error.status).json({ error: weightsCoerced.error.message });
+  }
+  const filterCoerced = coerceJsonObjectField(body.filter, "filter");
+  if (filterCoerced.error) {
+    return res.status(filterCoerced.error.status).json({ error: filterCoerced.error.message });
+  }
+  const filterNotCoerced = coerceJsonObjectField(body.filter_not, "filter_not");
+  if (filterNotCoerced.error) {
+    return res.status(filterNotCoerced.error.status).json({ error: filterNotCoerced.error.message });
+  }
+
+  const dimensionKeys = getDimensionKeys();
+  const queries = queriesCoerced.value;
+  if (queries) {
+    const invalidQueryKeys = Object.keys(queries).filter((k) => !dimensionKeys.includes(k));
+    if (invalidQueryKeys.length > 0) {
+      return res.status(400).json({
+        error: `Chaves de queries não permitidas: ${invalidQueryKeys.join(", ")}. Permitidas: ${dimensionKeys.join(", ")}`,
+      });
+    }
+  }
+
+  const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim();
+  const useBm25 =
+    body.bm25 !== false &&
+    Boolean(bm25VectorName) &&
+    (typeof body.bm25_query === "string" ? body.bm25_query.trim() !== "" : true);
+  const bm25_query = useBm25
+    ? (typeof body.bm25_query === "string" && body.bm25_query.trim()
+        ? body.bm25_query.trim()
+        : query)
+    : undefined;
+
+  const weights =
+    weightsCoerced.value ??
+    buildEqualWeights(dimensionKeys, Boolean(bm25_query));
+
+  const limit_per_vector = body.limit_per_vector != null ? Number(body.limit_per_vector) : 50;
+  const final_limit = body.final_limit != null ? Number(body.final_limit) : 20;
+  const embedDimensions = getEmbedDimensionsForCollection(COLLECTION_NAME, body);
+  const start = Date.now();
+
+  try {
+    const { vectors, perDimText, embedding_dims } = await buildVectorsFromQueryText({
+      query,
+      queries,
+      dimensionKeys,
+      embedDimensions,
+    });
+
+    const searchReq = {
+      ...req,
+      body: {
+        ...body,
+        query,
+        query_text:
+          typeof body.query_text === "string" && body.query_text.trim()
+            ? body.query_text.trim()
+            : query,
+        vectors,
+        weights,
+        filter: filterCoerced.value,
+        filter_not: filterNotCoerced.value,
+        limit_per_vector,
+        final_limit,
+        bm25_query,
+      },
+    };
+
+    const validationError = validateSearchBody(searchReq.body);
+    if (validationError) {
+      return res.status(validationError.status).json({ error: validationError.message });
+    }
+
+    logSuccess(ENDPOINT_SEARCH_TEXT, "Query vetorizada; iniciando busca", {
+      collection: COLLECTION_NAME,
+      embedding_dims,
+      dimensions: dimensionKeys.length,
+      duration_ms: Date.now() - start,
+      query_preview: query.slice(0, 80),
+      per_dim_override: Boolean(queries),
+    });
+
+    // Anexa metadados de vetorização na resposta via monkey-patch do json
+    const originalJson = res.json.bind(res);
+    res.json = (payload) => {
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        return originalJson({
+          ...payload,
+          query,
+          mode: "text",
+          embedding_model: "text-embedding-3-small",
+          embedding_dims,
+          query_texts: perDimText,
+        });
+      }
+      return originalJson(payload);
+    };
+
+    return handleSearch(searchReq, res, COLLECTION_NAME, ENDPOINT_SEARCH_TEXT);
+  } catch (err) {
+    const status = err.status ?? err.statusCode ?? 500;
+    const message = err.message || "Falha ao vetorizar query ou buscar no Qdrant";
+    logError(ENDPOINT_SEARCH_TEXT, "Busca por texto falhou", err, {
+      collection: COLLECTION_NAME,
+      status,
+    });
+    return res.status(status).json({ error: message });
+  }
 });
 
 /** Busca vetorial em coleção informada no body (não usa COLLECTION_NAME do env). */
