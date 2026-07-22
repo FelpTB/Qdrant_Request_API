@@ -62,6 +62,42 @@ QDRANT_VECTOR_NAMES=v_produto,v_servico,v_descricao,v_publico,v_cliente
 
 Outras: `SEARCH_TIMEOUT_SECONDS`, `PORT`, `HOST`.
 
+### MCP (agentes)
+
+A API expõe um servidor **MCP Streamable HTTP** em `POST/GET/DELETE /mcp` (sem autenticação nesta fase de testes).
+
+Tools:
+
+| Tool | Descrição |
+|------|-----------|
+| `get_config` | Chaves de dimensões, filtros, BM25 e rerank |
+| `search_text` | Busca por texto (mesmo pipeline de `POST /search/text`) com `query`, `queries`, `weights`, `filter`, `filter_not`, `bm25_query`, `bm25`, `limit_per_vector`, `final_limit`, `rerank`, `query_text`, `embed_dimensions` |
+
+URL após deploy no Railway: `https://SUA-API.up.railway.app/mcp`
+
+### Interface X-Ray (teste)
+
+Abra no browser:
+
+`https://SUA-API.up.railway.app/search/xray`
+
+ou localmente `http://localhost:3000/search/xray`.
+
+A página usa um **agente LLM** que, a partir da query do usuário:
+1. define `weights`, `queries` (por vetor denso), `bm25_query` e filtros
+2. monta o tool call MCP `search_text`
+3. executa a busca e mostra o raio-X do tool call + resultados
+
+Endpoint interno: `POST /search/xray/run` com `{ "query": "...", "final_limit": 10 }`.
+
+Teste local (API rodando):
+
+```bash
+npm run test:mcp:sdk -- "energia solar"
+```
+
+Ou aponte `MCP_URL` no `.env` para a URL pública.
+
 ---
 
 ## Deploy no Railway
@@ -327,7 +363,11 @@ API sobe em `http://0.0.0.0:3000` (ou `PORT`/`HOST` definidos no `.env`).
 
 ```
 src/
-  server.js              # Express: /search, /search/text, /search/validate-filter, /config, /health, /points/upsert, /company-profiles/mark-vectorized, /pipeline/*
+  server.js              # Express: /search, /search/text, /search/xray, /mcp, ...
+  searchXrayHtml.js      # UI de teste com raio-X dos parâmetros de busca
+  mcp/                   # MCP Streamable HTTP (tools get_config, search_text)
+    createMcpServer.js
+    mountMcp.js
   qdrantClient.js        # Cliente Qdrant Cloud
   multiVectorSearch.js   # Busca por vetores nomeados, fusão, BM25, remoção score 0 servico/produto
   upsertPoints.js        # Normalização e upsert em batch

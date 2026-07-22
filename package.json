@@ -9,16 +9,20 @@
     "dev": "node --watch src/server.js",
     "test": "node --test tests/transformProfile.test.js",
     "purge:qdrant-sem-nome": "node scripts/purgeQdrantSemNomeEmpresa.mjs",
-    "study:profile-chunks": "node scripts/profileChunkQualityStudy.mjs"
+    "study:profile-chunks": "node scripts/profileChunkQualityStudy.mjs",
+    "test:mcp": "node scripts/test-mcp-search.mjs",
+    "test:mcp:sdk": "node scripts/test-mcp-sdk.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@qdrant/js-client-rest": "^1.17.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "openai": "^6.27.0",
-    "pg": "^8.13.0"
+    "pg": "^8.13.0",
+    "zod": "^4.4.3"
   }
 }

@@ -8,9 +8,12 @@ import { isDbConfigured } from "./db.js";
 import { logSuccess, logError } from "./logger.js";
 import { getPipelineState, runPipeline } from "./pipeline.js";
 import { getDashboardHtml } from "./dashboardHtml.js";
+import { getSearchXrayHtml } from "./searchXrayHtml.js";
+import { runAgentSearch } from "./searchAgent.js";
 import { normalizeKeyword } from "./normalizeKeyword.js";
 import { embedQueryText } from "./embeddings.js";
 import { searchByTextQuery } from "./searchByQuery.js";
+import { mountMcp } from "./mcp/mountMcp.js";
 import "dotenv/config";
 
 const app = express();
@@ -534,8 +537,18 @@ function validateSearchBody(body) {
   return null;
 }
 
-async function handleSearch(req, res, collectionName, endpointLabel, includeCollectionInResponse = false) {
-  const { vectors, weights, limit_per_vector, final_limit, filter, filter_not, bm25_query, query_text } = req.body;
+/**
+ * Executa a busca multi-vetor e devolve o payload JSON (sem Express).
+ * Usado por HTTP e pelo MCP.
+ */
+async function runMultiVectorSearch({
+  body,
+  collectionName,
+  debugMode = false,
+  rerankMode = false,
+  includeCollectionInResponse = false,
+}) {
+  const { vectors, weights, limit_per_vector, final_limit, filter, filter_not, bm25_query, query_text } = body;
   const dimensionKeys = getDimensionKeys();
   const useBm25 = bm25_query != null && bm25_query !== "";
   const w = normalizeWeights(weights, dimensionKeys, useBm25);
@@ -548,8 +561,6 @@ async function handleSearch(req, res, collectionName, endpointLabel, includeColl
 
   const vectorsForSearch = {};
   for (const dim of dimensionKeys) vectorsForSearch[dim] = vectors[dim];
-  const debugMode = req.query.debug === "1";
-  const rerankMode = req.query.rerank === "1" || req.body.rerank === true;
 
   try {
     const out = await multiVectorSearch({
@@ -610,17 +621,15 @@ async function handleSearch(req, res, collectionName, endpointLabel, includeColl
       payload: item.payload,
     }));
 
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-
     if (debugMode && out.debug) {
       out.debug.filter_sent = qdrantFilter;
       out.debug.weights_used = w;
-      return res.json({
+      return {
         ...(includeCollectionInResponse ? { collection: collectionName } : {}),
         results: formattedResults,
         rerank: rerankInfo,
         debug: out.debug,
-      });
+      };
     }
 
     const response = {
@@ -628,19 +637,42 @@ async function handleSearch(req, res, collectionName, endpointLabel, includeColl
       results: formattedResults,
     };
     if (rerankInfo) response.rerank = rerankInfo;
-    return res.json(response);
+    return response;
   } catch (err) {
     const status = err.status ?? err.statusCode ?? 500;
     const message =
       status === 400 && err.data?.status?.error
         ? err.data.status.error
         : "Erro no banco vetorial (busca Qdrant)";
+    const wrapped = new Error(message);
+    wrapped.status = status;
+    wrapped.data = err.data;
+    throw wrapped;
+  }
+}
+
+async function handleSearch(req, res, collectionName, endpointLabel, includeCollectionInResponse = false) {
+  const debugMode = req.query.debug === "1";
+  const rerankMode = req.query.rerank === "1" || req.body.rerank === true;
+
+  try {
+    const payload = await runMultiVectorSearch({
+      body: req.body,
+      collectionName,
+      debugMode,
+      rerankMode,
+      includeCollectionInResponse,
+    });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.json(payload);
+  } catch (err) {
+    const status = err.status ?? err.statusCode ?? 500;
     logError(endpointLabel, "Busca vetorial falhou", err, {
       collection: collectionName,
       status,
       qdrant_error: err.data?.status?.error,
     });
-    return res.status(status).json({ error: message });
+    return res.status(status).json({ error: err.message || "Erro no banco vetorial (busca Qdrant)" });
   }
 }
 
@@ -713,45 +745,53 @@ async function buildVectorsFromQueryText({ query, queries, dimensionKeys, embedD
 }
 
 /**
- * Busca por texto na coleção padrão (COLLECTION_NAME):
- * vetoriza a query com OpenAI e executa o mesmo pipeline de POST /search.
- *
- * Body:
- * - query (string, obrigatório) — texto a vetorizar
- * - queries (objeto opcional) — texto por dimensão (produto, servico, ...)
- * - weights, filter, filter_not, limit_per_vector, final_limit, bm25_query, bm25, rerank, query_text, embed_dimensions
+ * Busca por texto na coleção padrão (COLLECTION_NAME).
+ * Usado por POST /search/text e pela tool MCP search_text.
+ * @throws {Error} com .status em falhas de validação / infra
  */
-app.post("/search/text", async (req, res) => {
+async function executeSearchByText(rawBody = {}, options = {}) {
   if (!COLLECTION_NAME) {
-    return res.status(500).json({ error: "COLLECTION_NAME não configurado no ambiente" });
+    const err = new Error("COLLECTION_NAME não configurado no ambiente");
+    err.status = 500;
+    throw err;
   }
   if (!process.env.OPENAI_API_KEY?.trim()) {
-    return res.status(503).json({
-      error: "OPENAI_API_KEY não configurado; necessário para vetorizar a query",
-    });
+    const err = new Error("OPENAI_API_KEY não configurado; necessário para vetorizar a query");
+    err.status = 503;
+    throw err;
   }
 
-  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const body = rawBody && typeof rawBody === "object" ? rawBody : {};
   const query = typeof body.query === "string" ? body.query.trim() : "";
   if (!query) {
-    return res.status(400).json({ error: "Campo 'query' é obrigatório (texto a buscar/vetorizar)" });
+    const err = new Error("Campo 'query' é obrigatório (texto a buscar/vetorizar)");
+    err.status = 400;
+    throw err;
   }
 
   const queriesCoerced = coerceJsonObjectField(body.queries, "queries");
   if (queriesCoerced.error) {
-    return res.status(queriesCoerced.error.status).json({ error: queriesCoerced.error.message });
+    const err = new Error(queriesCoerced.error.message);
+    err.status = queriesCoerced.error.status;
+    throw err;
   }
   const weightsCoerced = coerceJsonObjectField(body.weights, "weights");
   if (weightsCoerced.error) {
-    return res.status(weightsCoerced.error.status).json({ error: weightsCoerced.error.message });
+    const err = new Error(weightsCoerced.error.message);
+    err.status = weightsCoerced.error.status;
+    throw err;
   }
   const filterCoerced = coerceJsonObjectField(body.filter, "filter");
   if (filterCoerced.error) {
-    return res.status(filterCoerced.error.status).json({ error: filterCoerced.error.message });
+    const err = new Error(filterCoerced.error.message);
+    err.status = filterCoerced.error.status;
+    throw err;
   }
   const filterNotCoerced = coerceJsonObjectField(body.filter_not, "filter_not");
   if (filterNotCoerced.error) {
-    return res.status(filterNotCoerced.error.status).json({ error: filterNotCoerced.error.message });
+    const err = new Error(filterNotCoerced.error.message);
+    err.status = filterNotCoerced.error.status;
+    throw err;
   }
 
   const dimensionKeys = getDimensionKeys();
@@ -759,9 +799,11 @@ app.post("/search/text", async (req, res) => {
   if (queries) {
     const invalidQueryKeys = Object.keys(queries).filter((k) => !dimensionKeys.includes(k));
     if (invalidQueryKeys.length > 0) {
-      return res.status(400).json({
-        error: `Chaves de queries não permitidas: ${invalidQueryKeys.join(", ")}. Permitidas: ${dimensionKeys.join(", ")}`,
-      });
+      const err = new Error(
+        `Chaves de queries não permitidas: ${invalidQueryKeys.join(", ")}. Permitidas: ${dimensionKeys.join(", ")}`,
+      );
+      err.status = 400;
+      throw err;
     }
   }
 
@@ -784,6 +826,8 @@ app.post("/search/text", async (req, res) => {
   const final_limit = body.final_limit != null ? Number(body.final_limit) : 20;
   const embedDimensions = getEmbedDimensionsForCollection(COLLECTION_NAME, body);
   const start = Date.now();
+  const debugMode = options.debug === true;
+  const rerankMode = options.rerank === true || body.rerank === true;
 
   try {
     const { vectors, perDimText, embedding_dims } = await buildVectorsFromQueryText({
@@ -793,28 +837,27 @@ app.post("/search/text", async (req, res) => {
       embedDimensions,
     });
 
-    const searchReq = {
-      ...req,
-      body: {
-        ...body,
-        query,
-        query_text:
-          typeof body.query_text === "string" && body.query_text.trim()
-            ? body.query_text.trim()
-            : query,
-        vectors,
-        weights,
-        filter: filterCoerced.value,
-        filter_not: filterNotCoerced.value,
-        limit_per_vector,
-        final_limit,
-        bm25_query,
-      },
+    const searchBody = {
+      ...body,
+      query,
+      query_text:
+        typeof body.query_text === "string" && body.query_text.trim()
+          ? body.query_text.trim()
+          : query,
+      vectors,
+      weights,
+      filter: filterCoerced.value,
+      filter_not: filterNotCoerced.value,
+      limit_per_vector,
+      final_limit,
+      bm25_query,
     };
 
-    const validationError = validateSearchBody(searchReq.body);
+    const validationError = validateSearchBody(searchBody);
     if (validationError) {
-      return res.status(validationError.status).json({ error: validationError.message });
+      const err = new Error(validationError.message);
+      err.status = validationError.status;
+      throw err;
     }
 
     logSuccess(ENDPOINT_SEARCH_TEXT, "Query vetorizada; iniciando busca", {
@@ -826,31 +869,54 @@ app.post("/search/text", async (req, res) => {
       per_dim_override: Boolean(queries),
     });
 
-    // Anexa metadados de vetorização na resposta via monkey-patch do json
-    const originalJson = res.json.bind(res);
-    res.json = (payload) => {
-      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-        return originalJson({
-          ...payload,
-          query,
-          mode: "text",
-          embedding_model: "text-embedding-3-small",
-          embedding_dims,
-          query_texts: perDimText,
-        });
-      }
-      return originalJson(payload);
-    };
+    const payload = await runMultiVectorSearch({
+      body: searchBody,
+      collectionName: COLLECTION_NAME,
+      debugMode,
+      rerankMode,
+    });
 
-    return handleSearch(searchReq, res, COLLECTION_NAME, ENDPOINT_SEARCH_TEXT);
+    return {
+      ...payload,
+      query,
+      mode: "text",
+      embedding_model: "text-embedding-3-small",
+      embedding_dims,
+      query_texts: perDimText,
+    };
+  } catch (err) {
+    if (err.status) throw err;
+    const status = err.statusCode ?? 500;
+    const wrapped = new Error(err.message || "Falha ao vetorizar query ou buscar no Qdrant");
+    wrapped.status = status;
+    throw wrapped;
+  }
+}
+
+/**
+ * Busca por texto na coleção padrão (COLLECTION_NAME):
+ * vetoriza a query com OpenAI e executa o mesmo pipeline de POST /search.
+ *
+ * Body:
+ * - query (string, obrigatório) — texto a vetorizar
+ * - queries (objeto opcional) — texto por dimensão (produto, servico, ...)
+ * - weights, filter, filter_not, limit_per_vector, final_limit, bm25_query, bm25, rerank, query_text, embed_dimensions
+ */
+app.post("/search/text", async (req, res) => {
+  try {
+    const payload = await executeSearchByText(req.body || {}, {
+      debug: req.query.debug === "1",
+      rerank: req.query.rerank === "1",
+    });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.json(payload);
   } catch (err) {
     const status = err.status ?? err.statusCode ?? 500;
-    const message = err.message || "Falha ao vetorizar query ou buscar no Qdrant";
     logError(ENDPOINT_SEARCH_TEXT, "Busca por texto falhou", err, {
       collection: COLLECTION_NAME,
       status,
     });
-    return res.status(status).json({ error: message });
+    return res.status(status).json({ error: err.message || "Falha ao vetorizar query ou buscar no Qdrant" });
   }
 });
 
@@ -1112,18 +1178,16 @@ app.post("/search/validate-filter", express.json(), async (req, res) => {
 });
 
 /** Lista payloads e vetores disponíveis conforme variáveis de ambiente (filtro, vetores densos, BM25). */
-app.get("/config", (_req, res) => {
+function getPublicConfig() {
   const dimension_keys = getDimensionKeys();
   const payload_keys = getAllowedPayloadKeys();
   const payload_keys_full_text = getFullTextPayloadKeys();
   const vector_names = getVectorNamesMap();
   const bm25VectorName = process.env.QDRANT_BM25_VECTOR_NAME?.trim() || null;
   const bm25_payload_keys = getBm25PayloadKeys();
-
   const rrfK = Number(process.env.RRF_K);
 
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  return res.json({
+  return {
     architecture: "dual-path-rrf-v5",
     dimension_keys,
     payload_keys,
@@ -1151,11 +1215,65 @@ app.get("/config", (_req, res) => {
       pool_size: Number(process.env.LLM_RERANK_POOL) || 20,
       usage: "Envie rerank=1 como query param ou rerank: true no body para ativar. Inclua query_text com a busca original.",
     },
-  });
+    mcp: {
+      endpoint: "/mcp",
+      tools: ["get_config", "search_text"],
+      auth: false,
+    },
+  };
+}
+
+app.get("/config", (_req, res) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  return res.json(getPublicConfig());
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+  res.json({ status: "ok", mcp: "/mcp", search_xray: "/search/xray" });
+});
+
+/** UI de teste: busca com raio-X dos parâmetros (POST /search/text). */
+app.get("/search/xray", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(getSearchXrayHtml());
+});
+
+/**
+ * Agente X-Ray: LLM monta args da tool MCP search_text e executa a busca.
+ * Body: { query: string, final_limit?: number }
+ */
+app.post("/search/xray/run", async (req, res) => {
+  const query = typeof req.body?.query === "string" ? req.body.query.trim() : "";
+  if (!query) {
+    return res.status(400).json({ error: "Campo 'query' é obrigatório" });
+  }
+  const final_limit = req.body?.final_limit != null ? Number(req.body.final_limit) : 10;
+
+  try {
+    const out = await runAgentSearch({
+      userQuery: query,
+      config: getPublicConfig(),
+      executeSearchByText,
+      final_limit: Number.isInteger(final_limit) && final_limit >= 1 ? final_limit : 10,
+    });
+    logSuccess("POST /search/xray/run", "Agente MCP search_text executado", {
+      query_preview: query.slice(0, 80),
+      agent_ms: out.duration_ms,
+      search_ms: out.search_duration_ms,
+      results: out.search?.results?.length ?? 0,
+    });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.json(out);
+  } catch (err) {
+    const status = err.status ?? err.statusCode ?? 500;
+    logError("POST /search/xray/run", "Agente X-Ray falhou", err, { status });
+    return res.status(status).json({ error: err.message || "Falha no agente de busca" });
+  }
+});
+
+mountMcp(app, {
+  executeSearchByText,
+  getPublicConfig,
 });
 
 /** Pipeline: inicia processamento em background. Body: { limit: number }. */
@@ -1221,4 +1339,6 @@ const HOST = process.env.HOST || "0.0.0.0";
 
 app.listen(PORT, HOST, () => {
   console.log(`API de busca vetorial rodando em http://${HOST}:${PORT}`);
+  console.log(`MCP Streamable HTTP em http://${HOST}:${PORT}/mcp`);
+  console.log(`Busca X-Ray em http://${HOST}:${PORT}/search/xray`);
 });
